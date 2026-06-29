@@ -1,0 +1,76 @@
+@layer tailwind-base, semi, tailwind-components, tailwind-utils;
+@layer tailwind-base {
+  @tailwind base;
+}
+@layer tailwind-components {
+  @tailwind components;
+}
+@layer tailwind-utils {
+  @tailwind utilities;
+}
+
+:root {
+  --sidebar-width: 180px;
+  --sidebar-width-collapsed: 60px;
+  --sidebar-current-width: var(--sidebar-width);
+}
+
+body.sidebar-collapsed {
+  --sidebar-current-width: var(--sidebar-width-collapsed);
+}
+
+body {
+  font-family:
+    Lato, 'Helvetica Neue', Arial, Helvetica, 'Microsoft YaHei', sans-serif;
+  color: var(--semi-color-text-0);
+  background-color: var(--semi-color-bg-0);
+  transition:
+    background-color 0.2s ease,
+    color 0.2s ease;
+}
+
+/* 登录页装饰球 */
+.blur-ball {
+  position: absolute;
+  width: 360px;
+  height: 360px;
+  border-radius: 50%;
+  filter: blur(120px);
+}
+.blur-ball-indigo {
+  background: #6366f1;
+}
+.blur-ball-teal {
+  background: #14b8a6;
+}
+html:not(.dark) .blur-ball-indigo {
+  opacity: 0.25;
+}
+html:not(.dark) .blur-ball-teal {
+  opacity: 0.2;
+}
+
+.classic-page-fill {
+  min-height: 100vh;
+  width: 100%;
+}
+
+/* 固定布局：内容区为侧边栏让位 */
+.app-layout-fixed .semi-layout-content {
+  margin-left: var(--sidebar-current-width);
+}
+
+.sidebar-group-label {
+  padding: 8px 16px;
+  font-size: 12px;
+  color: var(--semi-color-text-2);
+  font-weight: 600;
+}
+
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}

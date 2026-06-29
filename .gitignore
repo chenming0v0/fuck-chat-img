@@ -1,0 +1,19 @@
+# 二进制与数据
+/bin/
+/data/
+*.db
+*.db-journal
+*.exe
+
+# 前端
+web/node_modules/
+web/dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# 临时
+*.log
+.DS_Store
