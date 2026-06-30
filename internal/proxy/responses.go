@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,7 +11,6 @@ import (
 	"time"
 
 	"github.com/fuck-chat-img/fci/internal/cache"
-	"github.com/fuck-chat-img/fci/internal/config"
 	"github.com/fuck-chat-img/fci/internal/model"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -66,7 +64,7 @@ func HandleResponses(c *gin.Context) {
 		if e, ok := cache.Get(cacheKey); ok {
 			cache.RecordHit()
 			replayCacheEntry(c, e)
-			recordHistory(reqID, grp, &req, true, true, "", "", 0, 0, time.Since(start), e.Value, "cache hit")
+			recordHistory(reqID, grp, &req, true, true, true, "", "", 0, 0, time.Since(start), e.Value, "cache hit")
 			return
 		}
 		cache.RecordMiss()
@@ -76,7 +74,7 @@ func HandleResponses(c *gin.Context) {
 	hasImage, imgCount, imgModelUsed, modifiedInput, imgErr := processImagesForInput(grp, req.Input)
 	if imgErr != nil {
 		// 图片识别失败 -> 直接报错(满足需求3)
-		recordHistory(reqID, grp, &req, hasImage, false, imgModelUsed, "", 0, 0, time.Since(start), nil, imgErr.Error())
+		recordHistory(reqID, grp, &req, hasImage, false, false, imgModelUsed, "", 0, 0, time.Since(start), nil, imgErr.Error())
 		writeErr(c, http.StatusBadGateway, imgErr.Error())
 		return
 	}
@@ -108,14 +106,16 @@ func processImagesForInput(g *modelGroupRuntime, input json.RawMessage) (hasImag
 		arr = []map[string]interface{}{single}
 	}
 
-	client := &http.Client{Timeout: time.Duration(config.Get().RequestTimeout) * time.Second}
+	client := sharedHTTPClient
 
 	for i := range arr {
 		cont, ok := arr[i]["content"].([]interface{})
 		if !ok {
 			continue
 		}
-		for j := range cont {
+		// 收集需要追加的文本项(避免在 range 循环中修改切片)
+		var extraItems []interface{}
+		for j := 0; j < len(cont); j++ {
 			cm, ok := cont[j].(map[string]interface{})
 			if !ok {
 				continue
@@ -144,10 +144,12 @@ func processImagesForInput(g *modelGroupRuntime, input json.RawMessage) (hasImag
 				// 用文本替换图片项
 				cont[j] = textItem
 			} else {
-				// 追加文本到图片之后
-				cont = append(cont[:j+1], append([]interface{}{textItem}, cont[j+1:]...)...)
-				arr[i]["content"] = cont
+				// 追加文本到图片之后(收集, 循环结束后统一追加)
+				extraItems = append(extraItems, textItem)
 			}
+		}
+		if len(extraItems) > 0 {
+			arr[i]["content"] = append(cont, extraItems...)
 		}
 	}
 
@@ -180,25 +182,24 @@ func rebuildResponsesBody(raw json.RawMessage, newInput []byte, g *modelGroupRun
 }
 
 func handleResponsesNonStream(c *gin.Context, g *modelGroupRuntime, body []byte, reqID string, req *responsesRequest, hasImage bool, imgCount int, imgModelUsed string, cacheKey string, start time.Time) {
-	client := &http.Client{Timeout: time.Duration(config.Get().RequestTimeout) * time.Second}
 	httpReq, err := http.NewRequest(http.MethodPost, g.MainText.ResponsesURL(), bytes.NewReader(body))
 	if err != nil {
-		recordHistory(reqID, g, req, hasImage, false, imgModelUsed, "", 0, 0, time.Since(start), nil, err.Error())
+		recordHistory(reqID, g, req, hasImage, false, false, imgModelUsed, "", 0, 0, time.Since(start), nil, err.Error())
 		writeErr(c, http.StatusInternalServerError, err.Error())
 		return
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+g.MainText.APIKey)
-	resp, err := client.Do(httpReq)
+	resp, err := sharedHTTPClient.Do(httpReq)
 	if err != nil {
-		recordHistory(reqID, g, req, hasImage, false, imgModelUsed, "", 0, 0, time.Since(start), nil, err.Error())
+		recordHistory(reqID, g, req, hasImage, false, false, imgModelUsed, "", 0, 0, time.Since(start), nil, err.Error())
 		writeErr(c, http.StatusBadGateway, "上游请求失败: "+err.Error())
 		return
 	}
 	defer resp.Body.Close()
 	respBytes, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		recordHistory(reqID, g, req, hasImage, false, imgModelUsed, "", 0, 0, time.Since(start), respBytes, fmt.Sprintf("上游 %d", resp.StatusCode))
+		recordHistory(reqID, g, req, hasImage, false, false, imgModelUsed, "", 0, 0, time.Since(start), respBytes, fmt.Sprintf("上游 %d", resp.StatusCode))
 		writeErr(c, resp.StatusCode, fmt.Sprintf("上游返回 %d: %s", resp.StatusCode, truncate(string(respBytes), 800)))
 		return
 	}
@@ -207,31 +208,30 @@ func handleResponsesNonStream(c *gin.Context, g *modelGroupRuntime, body []byte,
 		cache.Put(cacheKey, g.Name, respBytes)
 	}
 	pt, ct := extractUsage(respBytes)
-	recordHistory(reqID, g, req, hasImage, true, imgModelUsed, g.MainText.DisplayName(), pt, ct, time.Since(start), respBytes, "")
+	recordHistory(reqID, g, req, hasImage, true, false, imgModelUsed, g.MainText.DisplayName(), pt, ct, time.Since(start), respBytes, "")
 	c.Data(http.StatusOK, "application/json", respBytes)
 }
 
 func handleResponsesStream(c *gin.Context, g *modelGroupRuntime, body []byte, reqID string, req *responsesRequest, hasImage bool, imgCount int, imgModelUsed string, cacheKey string, start time.Time) {
-	client := &http.Client{Timeout: time.Duration(config.Get().RequestTimeout*2) * time.Second}
 	httpReq, err := http.NewRequest(http.MethodPost, g.MainText.ResponsesURL(), bytes.NewReader(body))
 	if err != nil {
-		recordHistory(reqID, g, req, hasImage, false, imgModelUsed, "", 0, 0, time.Since(start), nil, err.Error())
+		recordHistory(reqID, g, req, hasImage, false, false, imgModelUsed, "", 0, 0, time.Since(start), nil, err.Error())
 		writeErr(c, http.StatusInternalServerError, err.Error())
 		return
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "text/event-stream")
 	httpReq.Header.Set("Authorization", "Bearer "+g.MainText.APIKey)
-	resp, err := client.Do(httpReq)
+	resp, err := sharedStreamHTTPClient.Do(httpReq)
 	if err != nil {
-		recordHistory(reqID, g, req, hasImage, false, imgModelUsed, "", 0, 0, time.Since(start), nil, err.Error())
+		recordHistory(reqID, g, req, hasImage, false, false, imgModelUsed, "", 0, 0, time.Since(start), nil, err.Error())
 		writeErr(c, http.StatusBadGateway, "上游请求失败: "+err.Error())
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		respBytes, _ := io.ReadAll(resp.Body)
-		recordHistory(reqID, g, req, hasImage, false, imgModelUsed, "", 0, 0, time.Since(start), respBytes, fmt.Sprintf("上游 %d", resp.StatusCode))
+		recordHistory(reqID, g, req, hasImage, false, false, imgModelUsed, "", 0, 0, time.Since(start), respBytes, fmt.Sprintf("上游 %d", resp.StatusCode))
 		writeErr(c, resp.StatusCode, fmt.Sprintf("上游返回 %d: %s", resp.StatusCode, truncate(string(respBytes), 800)))
 		return
 	}
@@ -270,7 +270,7 @@ func handleResponsesStream(c *gin.Context, g *modelGroupRuntime, body []byte, re
 	if cache.Enabled() && len(collected) > 0 {
 		cache.PutStream(cacheKey, g.Name, collected)
 	}
-	recordHistory(reqID, g, req, hasImage, true, imgModelUsed, g.MainText.DisplayName(), pt, ct, time.Since(start), nil, "")
+	recordHistory(reqID, g, req, hasImage, true, false, imgModelUsed, g.MainText.DisplayName(), pt, ct, time.Since(start), nil, "")
 }
 
 // updateUsageFromSSE 从 SSE data 行提取 usage
@@ -389,26 +389,30 @@ func lookupGroup(name string) (*modelGroupRuntime, error) {
 }
 
 // recordHistory 异步记录历史
-func recordHistory(reqID string, g *modelGroupRuntime, req *responsesRequest, hasImage, success bool, imgModelUsed, mainModelUsed string, pt, ct int, dur time.Duration, respBytes []byte, errMsg string) {
+func recordHistory(reqID string, g *modelGroupRuntime, req *responsesRequest, hasImage, success, cacheHit bool, imgModelUsed, mainModelUsed string, pt, ct int, dur time.Duration, respBytes []byte, errMsg string) {
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				// 防止异步 goroutine panic 导致进程崩溃
+			}
+		}()
 		h := model.History{
-			RequestID:      reqID,
-			ModelGroup:     g.Name,
-			Endpoint:       "responses",
-			HasImage:       hasImage,
-			ImageModelUsed: imgModelUsed,
-			MainModelUsed:  mainModelUsed,
-			Success:        success,
-			ErrorMessage:   errMsg,
-			PromptTokens:   pt,
+			RequestID:        reqID,
+			ModelGroup:       g.Name,
+			Endpoint:         "responses",
+			HasImage:         hasImage,
+			CacheHit:         cacheHit,
+			ImageModelUsed:   imgModelUsed,
+			MainModelUsed:    mainModelUsed,
+			Success:          success,
+			ErrorMessage:     errMsg,
+			PromptTokens:     pt,
 			CompletionTokens: ct,
-			TotalTokens:    pt + ct,
-			LatencyMs:      dur.Milliseconds(),
-			InputSummary:   truncate(string(req.Input), 2000),
-			OutputSummary:  truncate(string(respBytes), 2000),
+			TotalTokens:      pt + ct,
+			LatencyMs:        dur.Milliseconds(),
+			InputSummary:     truncate(string(req.Input), 2000),
+			OutputSummary:    truncate(string(respBytes), 2000),
 		}
 		model.DB.Create(&h)
 	}()
 }
-
-var _ = errors.New

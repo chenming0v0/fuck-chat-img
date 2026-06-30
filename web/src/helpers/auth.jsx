@@ -106,13 +106,3 @@ export function AdminRoute({ children }) {
   }
   return children
 }
-
-// 独立的登出函数（便于在组件中直接调用）
-export function logout() {
-  localStorage.removeItem('fci_token')
-  localStorage.removeItem('fci_username')
-  localStorage.removeItem('fci_role')
-  if (typeof window !== 'undefined') {
-    window.location.href = '/login'
-  }
-}

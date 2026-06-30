@@ -2,9 +2,33 @@ package proxy
 
 import (
 	"encoding/json"
+	"net/http"
 	"strings"
 	"sync"
+	"time"
+
+	"github.com/fuck-chat-img/fci/internal/config"
 )
+
+// sharedHTTPClient 全局复用的 HTTP 客户端(连接池复用, 避免每次请求新建)
+var sharedHTTPClient = &http.Client{
+	Timeout: time.Duration(config.Get().RequestTimeout) * time.Second,
+	Transport: &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 20,
+		IdleConnTimeout:     90 * time.Second,
+	},
+}
+
+// sharedStreamHTTPClient 流式请求专用(更长超时)
+var sharedStreamHTTPClient = &http.Client{
+	Timeout: time.Duration(config.Get().RequestTimeout*2) * time.Second,
+	Transport: &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 20,
+		IdleConnTimeout:     90 * time.Second,
+	},
+}
 
 // UpstreamModelRT 运行时上游模型配置(来自 ModelGroup 的 JSON 字段反序列化)
 type UpstreamModelRT struct {
@@ -94,11 +118,18 @@ var (
 	rrIndex = map[string]int{}
 )
 
-// nextImageModels 按轮询策略返回尝试顺序
+// nextImageModels 按策略返回尝试顺序
+// round_robin: 从轮询游标位置开始依次尝试所有模型
+// failover: 只返回第一个模型(主模型), 失败后才尝试下一个(由 recognizeImage 处理)
 func nextImageModels(g *modelGroupRuntime) []UpstreamModelRT {
 	if len(g.ImageModels) == 0 {
 		return nil
 	}
+	if g.ImageStrategy == "failover" {
+		// failover: 始终从第一个模型开始尝试
+		return g.ImageModels
+	}
+	// round_robin: 从轮询游标位置开始
 	rrMu.Lock()
 	start := rrIndex[g.Name] % len(g.ImageModels)
 	rrIndex[g.Name] = (start + 1) % len(g.ImageModels)
@@ -108,4 +139,15 @@ func nextImageModels(g *modelGroupRuntime) []UpstreamModelRT {
 		out = append(out, g.ImageModels[(start+i)%len(g.ImageModels)])
 	}
 	return out
+}
+
+// CleanupRRIndex 清理已不存在的模型组的轮询游标(防止内存泄漏)
+func CleanupRRIndex(activeNames map[string]bool) {
+	rrMu.Lock()
+	defer rrMu.Unlock()
+	for name := range rrIndex {
+		if !activeNames[name] {
+			delete(rrIndex, name)
+		}
+	}
 }

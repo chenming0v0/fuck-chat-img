@@ -21,21 +21,32 @@ func SetupRouter() *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
+	// 安全: CORS 不能同时允许任意 Origin 和 Credentials
 	r.Use(cors.New(cors.Config{
-		AllowOriginFunc:  func(string) bool { return true },
+		AllowOriginFunc: func(origin string) bool {
+			// 同源请求 Origin 为空, 直接放行; 否则只允许配置的来源(此处同源部署, 不允许跨域)
+			return origin == ""
+		},
 		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowHeaders:     []string{"*"},
+		AllowHeaders:     []string{"Content-Type", "Authorization"},
 		ExposeHeaders:    []string{"Content-Length", "Content-Type"},
 		AllowCredentials: true,
 	}))
+	// 安全: 基础安全响应头
+	r.Use(func(c *gin.Context) {
+		c.Header("X-Content-Type-Options", "nosniff")
+		c.Header("X-Frame-Options", "DENY")
+		c.Next()
+	})
 
 	// ===== 公开接口 =====
 	api := r.Group("/api")
 	api.GET("/status", Status)
 	api.POST("/login", Login)
 
-	// ===== OpenAI 兼容代理接口 (不需要 Web UI 鉴权, 用模型组名作为访问凭证) =====
+	// ===== OpenAI 兼容代理接口 (使用模型组名作为访问凭证, /v1/models 需鉴权) =====
 	v1 := r.Group("/v1")
+	v1.Use(auth.MiddlewareProxyAuth())
 	v1.GET("/models", proxy.HandleModels)
 	v1.POST("/responses", proxy.HandleResponses)
 	v1.POST("/chat/completions", proxy.HandleChat)
@@ -49,16 +60,18 @@ func SetupRouter() *gin.Engine {
 		authed.GET("/user", UserInfo)
 		authed.POST("/user/password", ChangePassword)
 
-		// 模型组管理
+		// 模型组管理(普通用户只读, 管理员可写)
 		authed.GET("/groups", ListGroups)
 		authed.GET("/groups/:id", GetGroup)
+		// 明文 API Key 仅管理员可获取(用于编辑回填)
+		authed.GET("/groups/:id/plain", auth.MiddlewareAdmin(), GetGroupPlain)
 		authed.POST("/groups", auth.MiddlewareAdmin(), CreateGroup)
 		authed.PUT("/groups/:id", auth.MiddlewareAdmin(), UpdateGroup)
 		authed.DELETE("/groups/:id", auth.MiddlewareAdmin(), DeleteGroup)
 		authed.POST("/groups/:id/toggle", auth.MiddlewareAdmin(), ToggleGroup)
 		authed.GET("/groups/:id/test", TestGroup)
 
-		// 历史记录
+		// 历史记录(管理员可查看全部, 普通用户仅查看自己的)
 		authed.GET("/history", ListHistory)
 		authed.GET("/history/:id", GetHistory)
 		authed.DELETE("/history/:id", auth.MiddlewareAdmin(), DeleteHistory)
@@ -144,7 +157,7 @@ func serveIndex(c *gin.Context, indexBytes []byte) {
 	c.Data(http.StatusOK, "text/html; charset=utf-8", indexBytes)
 }
 
-// serveStaticFile 从 FS 读取并写入静态文件(带 Content-Type 推断)
+// serveStaticFile 从 FS 读取并写入静态文件(带 Content-Type 推断与缓存头)
 func serveStaticFile(c *gin.Context, rootFS fs.FS, p string) {
 	f, err := rootFS.Open(p)
 	if err != nil {
@@ -161,6 +174,10 @@ func serveStaticFile(c *gin.Context, rootFS fs.FS, p string) {
 	if err != nil {
 		c.Status(http.StatusInternalServerError)
 		return
+	}
+	// 静态资源(带 hash 文件名的 JS/CSS)长期缓存, 其他文件不缓存
+	if strings.HasSuffix(p, ".js") || strings.HasSuffix(p, ".css") || strings.HasSuffix(p, ".woff2") || strings.HasSuffix(p, ".woff") {
+		c.Header("Cache-Control", "public, max-age=31536000, immutable")
 	}
 	c.Data(http.StatusOK, contentTypeFor(p), data)
 }

@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
 
 	"github.com/fuck-chat-img/fci/internal/cache"
 	"github.com/fuck-chat-img/fci/internal/config"
@@ -64,8 +63,6 @@ func setupTestEnv(t *testing.T) (*gin.Engine, *int, *int, *[]byte) {
 	}))
 
 	// 写入一个模型组
-	mainJSON, _ := json.Marshal(model.UpstreamModel{BaseURL: imgSrv.URL, APIKey: "sk-img", Model: "vision-1"})
-	_ = mainJSON
 	mainConf, _ := json.Marshal(model.UpstreamModel{BaseURL: mainSrv.URL, APIKey: "sk-main", Model: "gpt-4o"})
 	imgConf, _ := json.Marshal([]model.UpstreamModel{{BaseURL: imgSrv.URL, APIKey: "sk-img", Model: "vision-1"}})
 	mg := model.ModelGroup{
@@ -148,7 +145,7 @@ func TestResponsesImageMixingAndCache(t *testing.T) {
 		t.Errorf("缓存命中后主模型不应再被调用, 实际 %d", *mainCalls)
 	}
 
-	// 第三次: 字段顺序不同但语义相同, 也应命中缓存
+	// 第三次: content 数组顺序不同 -> 语义不同, 不应命中缓存
 	reqBody3 := `{
 		"model": "mixed-vision",
 		"input": [
@@ -163,10 +160,36 @@ func TestResponsesImageMixingAndCache(t *testing.T) {
 	w3 := httptest.NewRecorder()
 	r.ServeHTTP(w3, req3)
 	if w3.Code != http.StatusOK {
-		t.Fatalf("乱序请求应命中缓存, status=%d", w3.Code)
+		t.Fatalf("第三次请求失败 status=%d body=%s", w3.Code, w3.Body.String())
 	}
-	if *imgCalls != 1 || *mainCalls != 1 {
-		t.Errorf("乱序同语义请求应命中缓存, img=%d main=%d", *imgCalls, *mainCalls)
+	// content 数组顺序变化 -> 语义不同 -> 应调用上游
+	if *imgCalls != 2 {
+		t.Errorf("content 顺序变化语义不同, 图片模型应被调用, 期望 2, 实际 %d", *imgCalls)
+	}
+	if *mainCalls != 2 {
+		t.Errorf("content 顺序变化语义不同, 主模型应被调用, 期望 2, 实际 %d", *mainCalls)
+	}
+
+	// 第四次: 对象字段顺序不同但数组顺序相同 -> 语义相同, 应命中缓存
+	reqBody4 := `{
+		"stream": false,
+		"model": "mixed-vision",
+		"input": [
+			{"content":[
+				{"type":"input_text","text":"这是什么?"},
+				{"type":"input_image","image_url":"https://example.com/cat.png"}
+			],"role":"user"}
+		]
+	}`
+	req4 := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(reqBody4))
+	w4 := httptest.NewRecorder()
+	r.ServeHTTP(w4, req4)
+	if w4.Code != http.StatusOK {
+		t.Fatalf("字段顺序不同的请求应命中缓存, status=%d", w4.Code)
+	}
+	// 字段顺序不同但数组顺序相同 -> 语义相同 -> 命中缓存, 不调用上游
+	if *imgCalls != 2 || *mainCalls != 2 {
+		t.Errorf("字段顺序不同但语义相同应命中缓存, img=%d main=%d", *imgCalls, *mainCalls)
 	}
 }
 
@@ -209,9 +232,4 @@ func TestModelsEndpoint(t *testing.T) {
 	if !bytes.Contains(w.Body.Bytes(), []byte("mixed-vision")) {
 		t.Errorf("models 应包含模型组名, body=%s", w.Body.String())
 	}
-}
-
-func init() {
-	// 确保时间引用(避免某些环境下 unused 警告)
-	_ = time.Now
 }

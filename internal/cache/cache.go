@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fuck-chat-img/fci/internal/config"
@@ -56,21 +57,32 @@ func Key(modelGroup string, canonicalInput []byte) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// Get 读取缓存
+// Get 读取缓存(LRU: 命中时将条目移到最近使用位置)
 func Get(key string) (*Entry, bool) {
 	if store == nil || !store.enabled {
 		return nil, false
 	}
-	store.mu.RLock()
+	store.mu.Lock()
+	defer store.mu.Unlock()
 	e, ok := store.items[key]
-	store.mu.RUnlock()
 	if !ok {
 		return nil, false
 	}
-	store.mu.Lock()
 	e.HitCount++
-	store.mu.Unlock()
+	// LRU: 将命中的 key 移到末尾(最近使用)
+	store.touchLocked(key)
 	return e, true
+}
+
+// touchLocked 将 key 移到 order 末尾(调用方持锁)
+func (s *Store) touchLocked(key string) {
+	for i, k := range s.order {
+		if k == key {
+			s.order = append(s.order[:i], s.order[i+1:]...)
+			s.order = append(s.order, key)
+			return
+		}
+	}
 }
 
 // Put 写入缓存(非流式)
@@ -83,6 +95,9 @@ func Put(key, modelName string, value []byte) {
 	if _, exists := store.items[key]; !exists {
 		store.order = append(store.order, key)
 		store.evictLocked()
+	} else {
+		// 已存在: 移到末尾(LRU)
+		store.touchLocked(key)
 	}
 	store.items[key] = &Entry{
 		Key:       key,
@@ -103,6 +118,8 @@ func PutStream(key, modelName string, events [][]byte) {
 	if _, exists := store.items[key]; !exists {
 		store.order = append(store.order, key)
 		store.evictLocked()
+	} else {
+		store.touchLocked(key)
 	}
 	store.items[key] = &Entry{
 		Key:          key,
@@ -136,11 +153,11 @@ var (
 	misses int64
 )
 
-// RecordHit 记录命中
-func RecordHit() { hits++ }
+// RecordHit 记录命中(原子操作, 并发安全)
+func RecordHit() { atomic.AddInt64(&hits, 1) }
 
-// RecordMiss 记录未命中
-func RecordMiss() { misses++ }
+// RecordMiss 记录未命中(原子操作, 并发安全)
+func RecordMiss() { atomic.AddInt64(&misses, 1) }
 
 // Stats 返回统计
 func GetStats() Stats {
@@ -153,8 +170,8 @@ func GetStats() Stats {
 		Enabled:  store.enabled,
 		Items:    len(store.items),
 		MaxItems: store.maxItems,
-		Hits:     hits,
-		Misses:   misses,
+		Hits:     atomic.LoadInt64(&hits),
+		Misses:   atomic.LoadInt64(&misses),
 	}
 }
 

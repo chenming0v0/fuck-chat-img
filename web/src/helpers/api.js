@@ -40,7 +40,7 @@ instance.interceptors.response.use(
 function pickMessage(error, fallback = '请求失败') {
   return (
     error?.response?.data?.message ||
-    error?.response?.data?.error ||
+    error?.response?.data?.error?.message ||
     error?.message ||
     fallback
   )
@@ -77,6 +77,10 @@ export function listGroups(params = {}) {
 }
 export function getGroup(id) {
   return instance.get(`/groups/${id}`)
+}
+// 获取明文 API Key(仅管理员, 用于编辑表单回填)
+export function getGroupPlain(id) {
+  return instance.get(`/groups/${id}/plain`)
 }
 export function createGroup(payload) {
   return instance.post('/groups', payload)

@@ -1,6 +1,6 @@
 import React from 'react'
 import { Routes, Route, Navigate } from 'react-router-dom'
-import { AuthProvider, ProtectedRoute } from '@/helpers/auth'
+import { AuthProvider, ProtectedRoute, AdminRoute } from '@/helpers/auth'
 import { ThemeProvider } from '@/context/Theme'
 import PageLayout from '@/components/layout/PageLayout'
 import Login from '@/pages/Login'
@@ -48,7 +48,7 @@ export default function App() {
             }
           >
             <Route index element={<Dashboard />} />
-            <Route path="groups" element={<ModelGroup />} />
+            <Route path="groups" element={<AdminRoute><ModelGroup /></AdminRoute>} />
             <Route path="plaza" element={<ModelPlaza />} />
             <Route path="history" element={<History />} />
             <Route path="settings" element={<Settings />} />

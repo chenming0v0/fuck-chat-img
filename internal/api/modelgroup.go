@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/fuck-chat-img/fci/internal/model"
+	"github.com/fuck-chat-img/fci/internal/proxy"
 	"github.com/gin-gonic/gin"
 )
 
@@ -45,8 +46,19 @@ func ListGroups(c *gin.Context) {
 	})
 }
 
-// GetGroup 获取单个
+// GetGroup 获取单个(始终脱敏 API Key, 编辑时通过 GetGroupPlain 获取明文)
 func GetGroup(c *gin.Context) {
+	id, _ := strconv.Atoi(c.Param("id"))
+	var g model.ModelGroup
+	if err := model.DB.First(&g, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"success": false, "message": "模型组不存在"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": groupToDTO(g, true)})
+}
+
+// GetGroupPlain 获取单个(明文 API Key, 仅管理员可用, 用于编辑表单回填)
+func GetGroupPlain(c *gin.Context) {
 	id, _ := strconv.Atoi(c.Param("id"))
 	var g model.ModelGroup
 	if err := model.DB.First(&g, id).Error; err != nil {
@@ -123,10 +135,18 @@ func UpdateGroup(c *gin.Context) {
 // DeleteGroup 删除
 func DeleteGroup(c *gin.Context) {
 	id, _ := strconv.Atoi(c.Param("id"))
+	// 先查出名称, 用于清理轮询游标
+	var g model.ModelGroup
+	if err := model.DB.First(&g, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"success": false, "message": "模型组不存在"})
+		return
+	}
 	if err := model.DB.Delete(&model.ModelGroup{}, id).Error; err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
 		return
 	}
+	// 清理轮询游标, 防止内存泄漏
+	proxy.CleanupRRIndex(map[string]bool{g.Name: false})
 	c.JSON(http.StatusOK, gin.H{"success": true, "message": "已删除"})
 }
 
@@ -139,7 +159,10 @@ func ToggleGroup(c *gin.Context) {
 		return
 	}
 	g.Enabled = !g.Enabled
-	model.DB.Save(&g)
+	if err := model.DB.Save(&g).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "更新失败: " + err.Error()})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": gin.H{"enabled": g.Enabled}})
 }
 

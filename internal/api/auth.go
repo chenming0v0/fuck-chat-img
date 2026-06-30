@@ -67,9 +67,19 @@ func ChangePassword(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "参数错误"})
 		return
 	}
-	uid, _ := c.Get(auth.ContextKeyUserID)
-	username, _ := c.Get(auth.ContextKeyUsername)
-	if _, ok := model.VerifyPassword(username.(string), req.OldPassword); !ok {
+	uidVal, _ := c.Get(auth.ContextKeyUserID)
+	usernameVal, _ := c.Get(auth.ContextKeyUsername)
+	uid, ok := uidVal.(uint)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "未登录"})
+		return
+	}
+	username, ok := usernameVal.(string)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "未登录"})
+		return
+	}
+	if _, ok := model.VerifyPassword(username, req.OldPassword); !ok {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "原密码错误"})
 		return
 	}
@@ -77,7 +87,7 @@ func ChangePassword(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "新密码至少6位"})
 		return
 	}
-	if err := model.UpdatePassword(uid.(uint), req.NewPassword); err != nil {
+	if err := model.UpdatePassword(uid, req.NewPassword); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": err.Error()})
 		return
 	}
