@@ -32,14 +32,17 @@ func main() {
 	defer stop()
 
 	srv := &http.Server{
-		Addr:    cfg.ListenAddr,
-		Handler: r,
+		Addr:         cfg.ListenAddr,
+		Handler:      r,
+		ReadTimeout:  15 * time.Second,
+		IdleTimeout:  60 * time.Second,
+		WriteTimeout: 3600 * time.Second,
 	}
 
 	serverErr := make(chan error, 1)
 	go func() {
-		log.Printf("[fuck-chat-img] 监听 %s", cfg.ListenAddr)
-		log.Printf("[fuck-chat-img] Web UI: http://localhost%s  代理端点: /v1/responses /v1/chat/completions", cfg.ListenAddr)
+		log.Printf("[fuck-chat-img] 服务已启动，监听 %s", cfg.ListenAddr)
+		log.Printf("[fuck-chat-img] 代理端点: /v1/responses /v1/chat/completions")
 		serverErr <- srv.ListenAndServe()
 	}()
 
@@ -63,9 +66,12 @@ func main() {
 		log.Printf("[fci] 优雅关闭超时或出错: %v", err)
 	}
 
-	// 关闭数据库连接, 确保待写入事务落盘(GORM 没有显式 Close, 取底层 *sql.DB 关闭).
-	if sqlDB, err := model.DB.DB(); err == nil {
-		_ = sqlDB.Close()
+	if sqlDB, err := model.DB.DB(); err != nil {
+		log.Printf("[fci] 获取底层数据库连接失败: %v", err)
+	} else {
+		if err := sqlDB.Close(); err != nil {
+			log.Printf("[fci] 关闭数据库连接失败: %v", err)
+		}
 	}
 	log.Printf("[fci] 已退出")
 }

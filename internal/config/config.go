@@ -10,8 +10,12 @@ import (
 	"strings"
 )
 
-// MinPasswordLength 全项目统一的密码最小长度(Setup / ChangePassword / initAdminFromEnv 共用)
-const MinPasswordLength = 6
+const (
+	// MinPasswordLength 全项目统一的密码最小长度(Setup / ChangePassword / initAdminFromEnv 共用)
+	MinPasswordLength = 6
+	defaultCacheMaxItems  = 10000
+	defaultRequestTimeout = 300
+)
 
 // MaxPasswordLength 全项目统一的密码最大长度.
 // bcrypt 会对超过 72 字节的密码静默截断只取前 72 字节, 两个前 72 位相同的长密码哈希一致,
@@ -68,16 +72,28 @@ func Load() {
 		cfg.InitAdminPass = v
 	}
 	if v := os.Getenv("FCI_CACHE_ENABLED"); v != "" {
-		cfg.CacheEnabled = strings.EqualFold(v, "true") || v == "1"
+		vLower := strings.ToLower(v)
+		switch vLower {
+		case "true", "1", "yes", "on":
+			cfg.CacheEnabled = true
+		case "false", "0", "no", "off":
+			cfg.CacheEnabled = false
+		default:
+			log.Printf("[fci] 警告: FCI_CACHE_ENABLED=%s 无法识别，使用默认值 true", v)
+		}
 	}
 	if v := os.Getenv("FCI_CACHE_MAX"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.CacheMaxItems = n
+		} else {
+			log.Printf("[fci] 警告: FCI_CACHE_MAX=%s 无效，使用默认值 %d", v, defaultCacheMaxItems)
 		}
 	}
 	if v := os.Getenv("FCI_REQUEST_TIMEOUT"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.RequestTimeout = n
+		} else {
+			log.Printf("[fci] 警告: FCI_REQUEST_TIMEOUT=%s 无效，使用默认值 %d", v, defaultRequestTimeout)
 		}
 	}
 	// 安全: 若未配置 JWT 密钥, 用 crypto/rand 生成随机密钥并警告(每次重启会变化, 导致旧 token 失效)

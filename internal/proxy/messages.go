@@ -130,7 +130,7 @@ func processImagesForMessagesValue(g *modelGroupRuntime, messages json.RawMessag
 	}
 	newBytes, mErr := json.Marshal(newV)
 	if mErr != nil {
-		return r.hasImage, r.imgCount, r.imgModel, messages, nil
+		return r.hasImage, r.imgCount, r.imgModel, messages, mErr
 	}
 	return r.hasImage, r.imgCount, r.imgModel, newBytes, nil
 }
@@ -266,8 +266,12 @@ func handleMessagesStream(c *gin.Context, g *modelGroupRuntime, body []byte, req
 	if cache.Enabled() && len(collected) > 0 && !clientDisconnected {
 		cache.PutStreamWithMeta(cacheKey, g.Name, collected, hasImage, imgCount, imgModelUsed)
 	}
+	var respBytes []byte
+	if !clientDisconnected {
+		respBytes = bytes.Join(collected, nil)
+	}
 	// 客户端断连时标记 success=false, 避免历史记录误报成功
-	recordMessagesHistory(reqID, userID, g, req, hasImage, !clientDisconnected, false, imgModelUsed, g.MainText.DisplayName(), imgCount, pt, ct, time.Since(start), nil, clientDisconnectedMsg(clientDisconnected))
+	recordMessagesHistory(reqID, userID, g, req, hasImage, !clientDisconnected, false, imgModelUsed, g.MainText.DisplayName(), imgCount, pt, ct, time.Since(start), respBytes, clientDisconnectedMsg(clientDisconnected))
 }
 
 // extractUsageMessages 从 Claude 非流式响应中提取 token 用量

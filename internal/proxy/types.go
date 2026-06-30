@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"sync"
@@ -14,7 +15,7 @@ import (
 
 // sharedHTTPClient 全局复用的 HTTP 客户端(连接池复用, 避免每次请求新建)
 // 注意: 包初始化时捕获 config.Get().RequestTimeout; 测试若改动超时需调用 resetHTTPClients.
-var sharedHTTPClient = newHTTPClient(config.Get().RequestTimeout, false)
+var sharedHTTPClient = newHTTPClient(config.Get().RequestTimeout)
 
 // sharedStreamHTTPClient 流式请求专用
 // 注意: 流式客户端不能设 http.Client.Timeout —— Timeout 字段会覆盖"读取整个响应体"的时间,
@@ -22,7 +23,7 @@ var sharedHTTPClient = newHTTPClient(config.Get().RequestTimeout, false)
 // 整体生命周期由上游 EOF + 客户端 context(见各 handler 的 WithContext)共同管理.
 var sharedStreamHTTPClient = newStreamHTTPClient(config.Get().RequestTimeout)
 
-func newHTTPClient(timeoutSec int, stream bool) *http.Client {
+func newHTTPClient(timeoutSec int) *http.Client {
 	return &http.Client{
 		Timeout: time.Duration(timeoutSec) * time.Second,
 		Transport: &http.Transport{
@@ -52,7 +53,7 @@ func resetHTTPClients() {
 	cfg := config.Get()
 	sharedHTTPClient.CloseIdleConnections()
 	sharedStreamHTTPClient.CloseIdleConnections()
-	sharedHTTPClient = newHTTPClient(cfg.RequestTimeout, false)
+	sharedHTTPClient = newHTTPClient(cfg.RequestTimeout)
 	sharedStreamHTTPClient = newStreamHTTPClient(cfg.RequestTimeout)
 }
 
@@ -175,7 +176,7 @@ type modelGroupRuntime struct {
 func ParseMain(s string) (UpstreamModelRT, error) {
 	var m UpstreamModelRT
 	if s == "" {
-		return m, &json.SyntaxError{}
+		return m, errors.New("empty main model config")
 	}
 	err := json.Unmarshal([]byte(s), &m)
 	return m, err

@@ -336,8 +336,12 @@ func handleResponsesStream(c *gin.Context, g *modelGroupRuntime, body []byte, re
 	if cache.Enabled() && len(collected) > 0 && !clientDisconnected {
 		cache.PutStreamWithMeta(cacheKey, g.Name, collected, hasImage, imgCount, imgModelUsed)
 	}
+	var respBytes []byte
+	if !clientDisconnected {
+		respBytes = bytes.Join(collected, nil)
+	}
 	// 客户端断连时标记 success=false, 避免历史记录误报成功
-	recordHistory(reqID, userID, g, req, hasImage, !clientDisconnected, false, imgModelUsed, g.MainText.DisplayName(), imgCount, pt, ct, time.Since(start), nil, clientDisconnectedMsg(clientDisconnected))
+	recordHistory(reqID, userID, g, req, hasImage, !clientDisconnected, false, imgModelUsed, g.MainText.DisplayName(), imgCount, pt, ct, time.Since(start), respBytes, clientDisconnectedMsg(clientDisconnected))
 }
 
 // updateUsageFromSSE 从 SSE data 行提取 usage
@@ -397,17 +401,26 @@ func extractUsage(b []byte) (int, int) {
 		return 0, 0
 	}
 	pt, ct := 0, 0
+	// OpenAI 风格
+	if v, ok := u["prompt_tokens"].(float64); ok {
+		pt = int(v)
+	}
+	if v, ok := u["completion_tokens"].(float64); ok {
+		ct = int(v)
+	}
+	// Anthropic 风格(若同时存在则覆盖 OpenAI 值, Anthropic SDK 不发 prompt_tokens)
 	if v, ok := u["input_tokens"].(float64); ok {
 		pt = int(v)
 	}
 	if v, ok := u["output_tokens"].(float64); ok {
 		ct = int(v)
 	}
-	if v, ok := u["prompt_tokens"].(float64); ok {
-		pt = int(v)
+	// Anthropic prompt caching 字段计入 input
+	if v, ok := u["cache_creation_input_tokens"].(float64); ok {
+		pt += int(v)
 	}
-	if v, ok := u["completion_tokens"].(float64); ok {
-		ct = int(v)
+	if v, ok := u["cache_read_input_tokens"].(float64); ok {
+		pt += int(v)
 	}
 	return pt, ct
 }

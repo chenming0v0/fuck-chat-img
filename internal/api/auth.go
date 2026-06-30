@@ -45,8 +45,16 @@ func Login(c *gin.Context) {
 
 // UserInfo 当前用户信息
 func UserInfo(c *gin.Context) {
-	uid, _ := c.Get(auth.ContextKeyUserID)
-	username, _ := c.Get(auth.ContextKeyUsername)
+	uid, ok := c.Get(auth.ContextKeyUserID)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "未登录"})
+		return
+	}
+	username, ok := c.Get(auth.ContextKeyUsername)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "未登录"})
+		return
+	}
 	role, _ := c.Get(auth.ContextKeyRole)
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -68,19 +76,12 @@ func ChangePassword(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "参数错误"})
 		return
 	}
-	uidVal, _ := c.Get(auth.ContextKeyUserID)
-	usernameVal, _ := c.Get(auth.ContextKeyUsername)
-	uid, ok := uidVal.(uint)
+	uid, ok := currentUserID(c)
 	if !ok {
 		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "未登录"})
 		return
 	}
-	username, ok := usernameVal.(string)
-	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "未登录"})
-		return
-	}
-	if _, ok := model.VerifyPassword(username, req.OldPassword); !ok {
+	if _, ok := model.VerifyPasswordByID(uid, req.OldPassword); !ok {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "原密码错误"})
 		return
 	}

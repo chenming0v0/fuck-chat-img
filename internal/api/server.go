@@ -3,6 +3,7 @@ package api
 import (
 	"io"
 	"io/fs"
+	"log"
 	"net/http"
 	"os"
 	"path"
@@ -16,7 +17,6 @@ import (
 	"github.com/fuck-chat-img/fci/internal/config"
 	"github.com/fuck-chat-img/fci/internal/proxy"
 	"github.com/fuck-chat-img/fci/web"
-	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 )
 
@@ -24,10 +24,14 @@ import (
 // 请求体天然较大, 但仍需设上限防止内存耗尽 DoS.
 const maxProxyBodyBytes = 32 << 20
 
+// maxAPIBodyBytes 管理接口请求体上限(1MiB), 管理接口不处理图片, body 很小
+const maxAPIBodyBytes = 1 << 20
+
 // SetupRouter 装配路由
 func SetupRouter() *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
+	r.Use(gin.Logger())
 	r.Use(gin.Recovery())
 	// 安全: 不信任任何 X-Forwarded-For / X-Real-IP 头(默认直连部署形态).
 	// 否则攻击者可伪造 XFF 头使 c.ClientIP() 返回任意 IP, 绕过 /api/login /api/setup
@@ -36,25 +40,24 @@ func SetupRouter() *gin.Engine {
 	// 安全: CORS 仅允许同源. 现代浏览器对同源 POST/PUT/DELETE 也会带 Origin 头,
 	// 因此不能只放行空 Origin——会误拒 SPA 自身的写请求. 这里:
 	//   - 空 Origin 放行(非浏览器客户端 / 同源 GET)
+	//   - 比对请求 Host 头, http(s)://<host> 形式视为同源
 	//   - 显式 Origin 通过 SetSameOriginHosts 白名单放行(部署方按需配置)
 	//   - 其余跨域拒绝
-	r.Use(cors.New(cors.Config{
-		AllowOriginFunc: func(origin string) bool {
-			if origin == "" {
-				return true
-			}
-			return isSameOrigin(origin)
-		},
-		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowHeaders:     []string{"Content-Type", "Authorization"},
-		ExposeHeaders:    []string{"Content-Length", "Content-Type"},
-		AllowCredentials: true,
-	}))
+	r.Use(corsMiddleware())
 	// 安全: 基础安全响应头
 	r.Use(func(c *gin.Context) {
 		c.Header("X-Content-Type-Options", "nosniff")
 		c.Header("X-Frame-Options", "DENY")
 		c.Header("Referrer-Policy", "strict-origin-when-cross-origin")
+		c.Next()
+	})
+	// 全局请求体大小限制: /v1/ 代理接口32MiB, /api/ 管理接口1MiB, 其他默认1MiB
+	r.Use(func(c *gin.Context) {
+		if strings.HasPrefix(c.Request.URL.Path, "/v1/") {
+			c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxProxyBodyBytes)
+		} else {
+			c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxAPIBodyBytes)
+		}
 		c.Next()
 	})
 
@@ -67,11 +70,6 @@ func SetupRouter() *gin.Engine {
 	// ===== OpenAI 兼容代理接口 (使用模型组名作为访问凭证, /v1/models 需鉴权) =====
 	v1 := r.Group("/v1")
 	v1.Use(auth.MiddlewareProxyAuth())
-	// 限制请求体大小, 防止超大 body 导致 OOM(图片场景已放宽到 32MiB)
-	v1.Use(func(c *gin.Context) {
-		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxProxyBodyBytes)
-		c.Next()
-	})
 	v1.GET("/models", proxy.HandleModels)
 	v1.POST("/responses", proxy.HandleResponses)
 	v1.POST("/chat/completions", proxy.HandleChat)
@@ -79,6 +77,7 @@ func SetupRouter() *gin.Engine {
 	v1.POST("/messages", proxy.HandleMessages)
 	// 兼容别名
 	v1.POST("/responses/", proxy.HandleResponses)
+	v1.POST("/chat/completions/", proxy.HandleChat)
 	v1.POST("/messages/", proxy.HandleMessages)
 
 	// ===== 需登录的管理接口 =====
@@ -122,12 +121,51 @@ func SetupRouter() *gin.Engine {
 // 用 atomic.Pointer 做整体替换, 避免运行期配置变更与请求处理路径的数据竞争.
 var sameOriginHosts atomic.Pointer[[]string]
 
-// isSameOrigin 判断 origin 是否与请求同源.
-// 优先比对请求的 Host(header) 对应的 http(s)://<host>; 也允许通过 sameOriginHosts 显式追加.
+// corsMiddleware 返回自定义 CORS 中间件, 能够访问请求 Host 头进行动态同源判断.
+// 这解决了 gin-contrib/cors 的 AllowOriginFunc 无法访问请求上下文的问题.
+func corsMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		origin := c.GetHeader("Origin")
+		if origin != "" {
+			allow := false
+			host := c.Request.Host
+			// 去除端口号进行比对(Host 可能含端口, Origin 也含端口, 直接前缀匹配即可)
+			if strings.HasPrefix(origin, "http://"+host) || strings.HasPrefix(origin, "https://"+host) {
+				allow = true
+			} else {
+				// 检查显式白名单
+				p := sameOriginHosts.Load()
+				if p != nil {
+					for _, h := range *p {
+						if origin == h {
+							allow = true
+							break
+						}
+					}
+				}
+			}
+			if allow {
+				c.Header("Access-Control-Allow-Origin", origin)
+				c.Header("Vary", "Origin")
+				c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+				c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+				c.Header("Access-Control-Expose-Headers", "Content-Length, Content-Type")
+				c.Header("Access-Control-Allow-Credentials", "true")
+			}
+		}
+		if c.Request.Method == http.MethodOptions {
+			c.AbortWithStatus(http.StatusNoContent)
+			return
+		}
+		c.Next()
+	}
+}
+
+// isSameOrigin 判断 origin 是否在显式白名单中(辅助函数, 主要逻辑在 corsMiddleware)
 func isSameOrigin(origin string) bool {
 	p := sameOriginHosts.Load()
-	if p == nil || len(*p) == 0 {
-		return false // 未配置白名单: 仅同源(空 Origin)放行
+	if p == nil {
+		return false
 	}
 	for _, h := range *p {
 		if origin == h {
@@ -155,6 +193,11 @@ func rateLimit(name string, limit int, window time.Duration) gin.HandlerFunc {
 	buckets := make(map[string]*bucket)
 	// 后台定期清理过期 bucket, 防止内存无限增长
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[fci] rate-limit cleanup goroutine panic: %v", r)
+			}
+		}()
 		ticker := time.NewTicker(5 * time.Minute)
 		defer ticker.Stop()
 		for range ticker.C {
@@ -255,7 +298,7 @@ func registerWebStatic(r *gin.Engine) {
 			c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "not found", "type": "not_found"}})
 			return
 		}
-		if strings.HasPrefix(c.Request.URL.Path, "/static/") {
+		if strings.HasPrefix(c.Request.URL.Path, "/static") {
 			c.Status(http.StatusNotFound)
 			return
 		}

@@ -1,5 +1,7 @@
 import axios from 'axios'
 
+let isHandling401 = false
+
 // 统一的 axios 实例，baseURL 同源 /api
 const instance = axios.create({
   baseURL: '/api',
@@ -25,6 +27,10 @@ instance.interceptors.response.use(
   (error) => {
     const status = error?.response?.status
     if (status === 401) {
+      if (isHandling401) {
+        return Promise.reject(error)
+      }
+      isHandling401 = true
       localStorage.removeItem('fci_token')
       localStorage.removeItem('fci_username')
       localStorage.removeItem('fci_role')
@@ -32,6 +38,9 @@ instance.interceptors.response.use(
       if (typeof window !== 'undefined' && window.location.pathname !== '/login' && window.location.pathname !== '/setup') {
         window.location.href = '/login'
       }
+      setTimeout(() => {
+        isHandling401 = false
+      }, 1000)
     }
     return Promise.reject(error)
   },

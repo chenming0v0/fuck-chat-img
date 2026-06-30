@@ -51,6 +51,9 @@ func initAdminFromEnv() error {
 	if cfg.InitAdminPass == "" {
 		return nil
 	}
+	// 创建完成后(无论成功失败)清零内存中的明文密码引用, 减少常驻内存暴露面
+	// (Go 字符串不可变无法真正擦除底层字节, 但消除 cfg.InitAdminPass 这一稳定引用)
+	defer func() { cfg.InitAdminPass = "" }()
 	// 与 Setup / ChangePassword 保持一致的密码强度校验, 避免环境变量误设弱密码
 	if err := config.ValidatePasswordStrength(cfg.InitAdminPass); err != nil {
 		return fmt.Errorf("FCI_ADMIN_PASS %w", err)
@@ -62,8 +65,11 @@ func initAdminFromEnv() error {
 		return fmt.Errorf("FCI_ADMIN_USER 不能为空")
 	}
 	var count int64
-	DB.Model(&User{}).Count(&count)
+	if err := DB.Model(&User{}).Count(&count).Error; err != nil {
+		return fmt.Errorf("查询用户数量失败: %w", err)
+	}
 	if count > 0 {
+		log.Printf("[fci] 已存在 %d 个用户, 跳过环境变量管理员创建", count)
 		return nil
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(cfg.InitAdminPass), bcrypt.DefaultCost)
@@ -77,7 +83,7 @@ func initAdminFromEnv() error {
 		Status:       1,
 	}
 	if err := DB.Create(&u).Error; err != nil {
-		// Low-9: 唯一约束冲突不应阻断启动(并发初始化/旧数据残留都可能触发).
+		// 唯一约束冲突不应阻断启动(并发初始化/旧数据残留都可能触发).
 		// 与 SetupAdmin 一致地视为"已存在, 跳过"而非致命错误
 		if errors.Is(err, gorm.ErrDuplicatedKey) || isUniqueConstraintErr(err) {
 			log.Printf("[fci] 管理员账户 %s 已存在, 跳过创建", adminUser)
@@ -86,16 +92,16 @@ func initAdminFromEnv() error {
 		return err
 	}
 	log.Printf("[fci] 已通过环境变量创建管理员账户: %s", adminUser)
-	// Low-6: 创建完成后清零内存中的明文密码引用, 减少常驻内存暴露面
-	// (Go 字符串不可变无法真正擦除底层字节, 但消除 cfg.InitAdminPass 这一稳定引用)
-	cfg.InitAdminPass = ""
 	return nil
 }
 
 // IsSetupRequired 判断是否需要进行首次管理员设置(没有任何用户时返回 true)
 func IsSetupRequired() bool {
 	var count int64
-	DB.Model(&User{}).Count(&count)
+	if err := DB.Model(&User{}).Count(&count).Error; err != nil {
+		log.Printf("[fci] IsSetupRequired 查询失败: %v", err)
+		return false
+	}
 	return count == 0
 }
 
@@ -146,6 +152,18 @@ func isUniqueConstraintErr(err error) bool {
 func VerifyPassword(username, password string) (*User, bool) {
 	var u User
 	if err := DB.Where("username = ? AND status = 1", username).First(&u).Error; err != nil {
+		return nil, false
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(password)); err != nil {
+		return nil, false
+	}
+	return &u, true
+}
+
+// VerifyPasswordByID 通过用户ID校验密码
+func VerifyPasswordByID(userID uint, password string) (*User, bool) {
+	var u User
+	if err := DB.Where("id = ? AND status = 1", userID).First(&u).Error; err != nil {
 		return nil, false
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(password)); err != nil {

@@ -20,6 +20,9 @@ const (
 	ContextKeyUsername = "username"
 	ContextKeyRole     = "role"
 	ContextKeyAdmin    = "is_admin"
+	// ProxyUserID 代理密钥认证请求使用的固定用户ID(非零, 确保历史记录归属可追溯).
+	// 使用 MaxUint 避免与正常自增用户ID冲突.
+	ProxyUserID uint = ^uint(0)
 )
 
 // Claims JWT 载荷
@@ -141,8 +144,9 @@ func MiddlewareAuth() gin.HandlerFunc {
 // MiddlewareAdmin 要求管理员
 func MiddlewareAdmin() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		isAdmin, _ := c.Get(ContextKeyAdmin)
-		if isAdmin != true {
+		v, exists := c.Get(ContextKeyAdmin)
+		isAdmin, ok := v.(bool)
+		if !exists || !ok || !isAdmin {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"success": false, "message": "需要管理员权限"})
 			return
 		}
@@ -181,6 +185,9 @@ func MiddlewareProxyAuth() gin.HandlerFunc {
 		// 2. 校验代理访问密钥(常量时间比较, 防时序侧信道; 仅从 Header 取, 避免 query 泄漏)
 		if proxyKey != "" {
 			if pk := extractProxyKey(c); pk != "" && subtle.ConstantTimeCompare([]byte(pk), []byte(proxyKey)) == 1 {
+				c.Set(ContextKeyUserID, ProxyUserID)
+				c.Set(ContextKeyUsername, "__proxy__")
+				c.Set(ContextKeyRole, "proxy")
 				c.Set(ContextKeyAdmin, false)
 				c.Next()
 				return

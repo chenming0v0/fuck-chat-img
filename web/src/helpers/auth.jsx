@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useState } from 'react'
+import React, { createContext, useContext, useEffect, useRef, useState } from 'react'
 import { Navigate, useLocation } from 'react-router-dom'
 import * as api from './api'
 
@@ -12,13 +12,25 @@ export function AuthProvider({ children }) {
   )
   const [role, setRole] = useState(() => localStorage.getItem('fci_role') || '')
   const [user, setUser] = useState(null)
+  const mountedRef = useRef(true)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
 
   // 登录：保存 token、用户名、角色
   function handleLogin(data) {
     const { token: t, username: u, role: r } = data
     localStorage.setItem('fci_token', t)
     localStorage.setItem('fci_username', u)
-    if (r) localStorage.setItem('fci_role', r)
+    if (r) {
+      localStorage.setItem('fci_role', r)
+    } else {
+      localStorage.removeItem('fci_role')
+    }
     setToken(t)
     setUsername(u)
     setRole(r || '')
@@ -29,10 +41,12 @@ export function AuthProvider({ children }) {
     localStorage.removeItem('fci_token')
     localStorage.removeItem('fci_username')
     localStorage.removeItem('fci_role')
-    setToken(null)
-    setUsername('')
-    setRole('')
-    setUser(null)
+    if (mountedRef.current) {
+      setToken(null)
+      setUsername('')
+      setRole('')
+      setUser(null)
+    }
   }
 
   // 拉取当前用户信息（用于刷新页面后恢复 role）
@@ -40,15 +54,20 @@ export function AuthProvider({ children }) {
     if (!token) return null
     try {
       const res = await api.getUser()
+      if (!mountedRef.current) return null
       if (res?.success) {
         setUser(res.data)
         if (res.data?.role) {
           setRole(res.data.role)
           localStorage.setItem('fci_role', res.data.role)
+        } else {
+          setRole('')
+          localStorage.removeItem('fci_role')
         }
         return res.data
       }
     } catch (e) {
+      if (!mountedRef.current) return null
       // token 失效则登出
       if (e?.response?.status === 401) {
         logout()

@@ -104,7 +104,7 @@ func extractImageRef(c map[string]interface{}) (url string, b64 string, ok bool)
 			if strings.HasPrefix(s, "data:") {
 				return "", s, true
 			}
-			return s, "", true
+			return "", "data:image/png;base64," + s, true
 		}
 	}
 	// Claude 格式: {type: image, source: {type: base64|url, media_type, data|url}}
@@ -132,12 +132,16 @@ func extractImageRef(c map[string]interface{}) (url string, b64 string, ok bool)
 
 // isImageContentItem 判断 map 是否为图片 content item(任意已知格式)
 func isImageContentItem(c map[string]interface{}) bool {
-	typ, _ := c["type"].(string)
-	switch typ {
-	case "image_url", "input_image", "image":
-		return true
+	typ, hasType := c["type"].(string)
+	if hasType {
+		switch typ {
+		case "image_url", "input_image", "image":
+			return true
+		default:
+			return false
+		}
 	}
-	// source 字段是 Claude 图片标志
+	// 无 type 字段时, source 字段是 Claude 图片标志
 	if _, has := c["source"]; has {
 		return true
 	}
@@ -254,11 +258,11 @@ func contentToString(c interface{}) string {
 			if m, ok := e.(map[string]interface{}); ok {
 				if t, _ := m["text"].(string); t != "" {
 					sb.WriteString(t)
+					continue
 				}
-			} else {
-				b, _ := json.Marshal(e)
-				sb.Write(b)
 			}
+			b, _ := json.Marshal(e)
+			sb.Write(b)
 		}
 		return sb.String()
 	default:

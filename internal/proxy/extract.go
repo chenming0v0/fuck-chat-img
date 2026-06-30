@@ -81,7 +81,9 @@ func processImagesInValueCfg(g *modelGroupRuntime, v interface{}, cfg imgProcess
 					if err != nil {
 						res.hasImage = true
 						res.imgCount++
-						res.imgModel = used
+						if used != "" {
+							res.imgModel = used
+						}
 						res.err = err
 						// 出错仍保留原元素
 						out = append(out, elem)
@@ -89,7 +91,9 @@ func processImagesInValueCfg(g *modelGroupRuntime, v interface{}, cfg imgProcess
 					}
 					res.hasImage = true
 					res.imgCount++
-					res.imgModel = used
+					if used != "" {
+						res.imgModel = used
+					}
 					res.modified = true
 					textItem := map[string]interface{}{
 						"type": cfg.textType,
@@ -125,13 +129,17 @@ func processImagesInValueCfg(g *modelGroupRuntime, v interface{}, cfg imgProcess
 				if err != nil {
 					res.hasImage = true
 					res.imgCount = 1
-					res.imgModel = used
+					if used != "" {
+						res.imgModel = used
+					}
 					res.err = err
 					return t, res
 				}
 				res.hasImage = true
 				res.imgCount = 1
-				res.imgModel = used
+				if used != "" {
+					res.imgModel = used
+				}
 				res.modified = true
 				return map[string]interface{}{
 					"type": cfg.textType,
@@ -161,17 +169,12 @@ func processImagesInValueCfg(g *modelGroupRuntime, v interface{}, cfg imgProcess
 			var inner interface{}
 			if err := json.Unmarshal([]byte(s), &inner); err == nil {
 				newInner, sub := processImagesInValueCfg(g, inner, cfg)
+				mergeResult(&res, &sub)
 				if sub.hasImage {
 					if newBytes, mErr := json.Marshal(newInner); mErr == nil {
-						res.hasImage = true
-						res.imgCount = sub.imgCount
-						res.imgModel = sub.imgModel
-						res.err = sub.err
-						res.modified = true
 						return string(newBytes), res
 					}
 				}
-				// 解析为 JSON 但没找到图片或序列化失败: 返回原值
 				return t, res
 			}
 		}
@@ -182,13 +185,17 @@ func processImagesInValueCfg(g *modelGroupRuntime, v interface{}, cfg imgProcess
 			if err != nil {
 				res.hasImage = true
 				res.imgCount = 1
-				res.imgModel = used
+				if used != "" {
+					res.imgModel = used
+				}
 				res.err = err
 				return t, res
 			}
 			res.hasImage = true
 			res.imgCount = 1
-			res.imgModel = used
+			if used != "" {
+				res.imgModel = used
+			}
 			res.modified = true
 			return "[图片识别结果]\n" + desc, res
 		}
@@ -260,7 +267,7 @@ func processImagesInStringContentCfg(g *modelGroupRuntime, s string, cfg imgProc
 			}
 			newBytes, mErr := json.Marshal(newV)
 			if mErr != nil {
-				return s, r.hasImage, r.imgCount, r.imgModel, nil
+				return s, r.hasImage, r.imgCount, r.imgModel, mErr
 			}
 			return string(newBytes), true, r.imgCount, r.imgModel, nil
 		}
