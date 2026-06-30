@@ -10,38 +10,47 @@ import {
   ChevronsLeft,
   ChevronsRight,
 } from 'lucide-react'
+import { useAuth } from '@/helpers/auth'
 
 // 侧边导航：分组「控制台」「个人」
 export default function SiderBar({ collapsed, onToggle }) {
   const location = useLocation()
   const navigate = useNavigate()
+  const { isAdmin } = useAuth()
+
+  const consoleItems = [
+    {
+      itemKey: '/console',
+      text: '仪表盘',
+      icon: <LayoutDashboard size={16} />,
+    },
+    // 模型组管理仅管理员可见
+    ...(isAdmin
+      ? [
+          {
+            itemKey: '/console/groups',
+            text: '模型组管理',
+            icon: <Boxes size={16} />,
+          },
+        ]
+      : []),
+    {
+      itemKey: '/console/plaza',
+      text: '模型广场',
+      icon: <Store size={16} />,
+    },
+    {
+      itemKey: '/console/history',
+      text: '历史记录',
+      icon: <HistoryIcon size={16} />,
+    },
+  ]
 
   const items = [
     {
       itemKey: 'console',
       text: '控制台',
-      items: [
-        {
-          itemKey: '/console',
-          text: '仪表盘',
-          icon: <LayoutDashboard size={16} />,
-        },
-        {
-          itemKey: '/console/groups',
-          text: '模型组管理',
-          icon: <Boxes size={16} />,
-        },
-        {
-          itemKey: '/console/plaza',
-          text: '模型广场',
-          icon: <Store size={16} />,
-        },
-        {
-          itemKey: '/console/history',
-          text: '历史记录',
-          icon: <HistoryIcon size={16} />,
-        },
-      ],
+      items: consoleItems,
     },
     {
       itemKey: 'personal',

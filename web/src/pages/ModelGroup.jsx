@@ -11,7 +11,6 @@ import {
   Pagination,
   Empty,
   Spin,
-  Toast,
   Divider,
   Typography,
 } from '@douyinfe/semi-ui'
@@ -21,7 +20,7 @@ import { toast } from 'react-toastify'
 import CardPro from '@/components/common/ui/CardPro'
 import {
   listGroups,
-  getGroup,
+  getGroupPlain,
   createGroup,
   updateGroup,
   deleteGroup,
@@ -108,7 +107,7 @@ export default function ModelGroup() {
     setModalVisible(true)
     setModalLoading(true)
     try {
-      const res = await getGroup(row.id)
+      const res = await getGroupPlain(row.id)
       if (res?.success && res.data) {
         const g = res.data
         const main = {
