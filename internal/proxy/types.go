@@ -73,6 +73,19 @@ func (u UpstreamModelRT) ResponsesURL() string {
 	return base + "/responses"
 }
 
+// MessagesURL Claude/Anthropic 兼容的 messages 入口
+// 默认走 base + /messages, 上游应当是 Claude 兼容服务(如 Anthropic API 或 claude-code-router)
+func (u UpstreamModelRT) MessagesURL() string {
+	if u.ExtraURL != "" {
+		return u.ExtraURL
+	}
+	base := strings.TrimRight(u.BaseURL, "/")
+	if base == "" {
+		base = "https://api.anthropic.com/v1"
+	}
+	return base + "/messages"
+}
+
 func hostOf(u string) string {
 	u = strings.TrimPrefix(u, "https://")
 	u = strings.TrimPrefix(u, "http://")

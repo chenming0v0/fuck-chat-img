@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/fuck-chat-img/fci/internal/cache"
@@ -231,5 +232,178 @@ func TestModelsEndpoint(t *testing.T) {
 	}
 	if !bytes.Contains(w.Body.Bytes(), []byte("mixed-vision")) {
 		t.Errorf("models 应包含模型组名, body=%s", w.Body.String())
+	}
+}
+
+// setupMessagesTestEnv 构建一个用于 /v1/messages (Claude) 端到端测试的环境
+// 模拟图片模型返回固定描述, 模拟上游 Claude API 返回固定 message
+func setupMessagesTestEnv(t *testing.T) (*gin.Engine, *int, *int) {
+	t.Helper()
+	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared&_busy_timeout=5000"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.AutoMigrate(&model.User{}, &model.ModelGroup{}, &model.History{})
+	db.Exec("DELETE FROM model_groups")
+	db.Exec("DELETE FROM histories")
+	model.DB = db
+
+	cfg := config.Get()
+	cfg.CacheEnabled = true
+	cfg.CacheMaxItems = 1000
+	cfg.RequestTimeout = 10
+	cache.Init()
+
+	imgCalls := 0
+	imgSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		imgCalls++
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"choices":[{"message":{"content":"图片里是一只猫"}}]}`))
+	}))
+
+	mainCalls := 0
+	mainSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mainCalls++
+		// 校验: 转发到上游的 messages 中不应再含原始 base64 图片
+		body, _ := io.ReadAll(r.Body)
+		if bytes.Contains(body, []byte("iVBORw0KGgo")) {
+			t.Errorf("转发到上游的 messages 不应包含原始 base64 图片数据, body=%s", truncate(string(body), 500))
+		}
+		// 上游应当透传 anthropic-version 头
+		if v := r.Header.Get("anthropic-version"); v == "" {
+			t.Errorf("上游应透传 anthropic-version 头")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"msg_test","type":"message","role":"assistant","content":[{"type":"text","text":"这是一只猫"}],"usage":{"input_tokens":10,"output_tokens":5}}`))
+	}))
+
+	mainConf, _ := json.Marshal(model.UpstreamModel{BaseURL: mainSrv.URL, APIKey: "sk-main", Model: "claude-3"})
+	imgConf, _ := json.Marshal([]model.UpstreamModel{{BaseURL: imgSrv.URL, APIKey: "sk-img", Model: "vision-1"}})
+	mg := model.ModelGroup{
+		Name:          "claude-vision",
+		MainTextModel: string(mainConf),
+		ImageModels:   string(imgConf),
+		ImageStrategy: "round_robin",
+		ImagePrompt:   "描述图片",
+		ReplaceImage:  true,
+		Enabled:       true,
+	}
+	if err := db.Create(&mg).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.POST("/v1/messages", HandleMessages)
+
+	t.Cleanup(func() {
+		imgSrv.Close()
+		mainSrv.Close()
+	})
+	return r, &imgCalls, &mainCalls
+}
+
+// TestMessagesImageAndCache 端到端验证 Claude /v1/messages 流程:
+// 1. 第一次请求: Claude image+source 格式 -> 图片识别 + 转发上游 + 写缓存
+// 2. 第二次相同请求: 命中缓存, 图片模型与上游都不再调用
+// 3. 第三次: 同图片但外层 id/created_at 不同 -> 仍命中缓存(规范化剥离易变字段)
+func TestMessagesImageAndCache(t *testing.T) {
+	r, imgCalls, mainCalls := setupMessagesTestEnv(t)
+
+	// 1. Claude image+source 格式
+	reqBody := `{
+		"model": "claude-vision",
+		"messages": [{"role":"user","content":[
+			{"type":"text","text":"这是什么?"},
+			{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYPhfDwAChwGA60L6UwAAAABJRU5ErkJggg=="}}
+		]}],
+		"stream": false,
+		"max_tokens": 100
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(reqBody))
+	req.Header.Set("anthropic-version", "2023-06-01")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("第一次请求失败 status=%d body=%s", w.Code, w.Body.String())
+	}
+	if *imgCalls != 1 {
+		t.Errorf("图片模型应被调用1次, 实际 %d", *imgCalls)
+	}
+	if *mainCalls != 1 {
+		t.Errorf("上游应被调用1次, 实际 %d", *mainCalls)
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte("一只猫")) {
+		t.Errorf("响应应包含主模型输出, body=%s", w.Body.String())
+	}
+
+	// 2. 第二次相同请求: 应命中缓存
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(reqBody))
+	req2.Header.Set("anthropic-version", "2023-06-01")
+	w2 := httptest.NewRecorder()
+	r.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("第二次请求失败 status=%d body=%s", w2.Code, w2.Body.String())
+	}
+	if *imgCalls != 1 || *mainCalls != 1 {
+		t.Errorf("缓存命中后不应再调用上游/图片模型, img=%d main=%d", *imgCalls, *mainCalls)
+	}
+	if !bytes.Contains(w2.Body.Bytes(), []byte("一只猫")) {
+		t.Errorf("缓存回放应返回相同内容, body=%s", w2.Body.String())
+	}
+
+	// 3. 第三次: 同图片, 外层 id 不同 -> 仍应命中缓存
+	reqBody3 := `{
+		"id": "req-different-id",
+		"created_at": 99999,
+		"model": "claude-vision",
+		"messages": [{"role":"user","content":[
+			{"type":"text","text":"这是什么?"},
+			{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYPhfDwAChwGA60L6UwAAAABJRU5ErkJggg=="}}
+		]}],
+		"stream": false,
+		"max_tokens": 100
+	}`
+	req3 := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(reqBody3))
+	req3.Header.Set("anthropic-version", "2023-06-01")
+	w3 := httptest.NewRecorder()
+	r.ServeHTTP(w3, req3)
+	if w3.Code != http.StatusOK {
+		t.Fatalf("第三次请求失败 status=%d body=%s", w3.Code, w3.Body.String())
+	}
+	if *imgCalls != 1 || *mainCalls != 1 {
+		t.Errorf("同图片+易变字段差异应命中缓存, img=%d main=%d", *imgCalls, *mainCalls)
+	}
+}
+
+// TestMessagesCodexToolForm 端到端验证 Codex 工具形态:
+// role=tool 消息 content 是 JSON 字符串, 内含 base64 图片 -> 应识别并替换
+func TestMessagesCodexToolForm(t *testing.T) {
+	r, imgCalls, mainCalls := setupMessagesTestEnv(t)
+
+	// Codex 形态: role=tool 的 content 是 JSON 字符串, 字符串内含 base64 data URL
+	inner := `{"image":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYPhfDwAChwGA60L6UwAAAABJRU5ErkJggg==","tool":"view_image"}`
+	innerEscaped := strings.ReplaceAll(strings.ReplaceAll(inner, `\`, `\\`), `"`, `\"`)
+	reqBody := `{
+		"model": "claude-vision",
+		"messages": [
+			{"role":"user","content":"请看截图"},
+			{"role":"assistant","content":"我来查看"},
+			{"role":"tool","content":"` + innerEscaped + `"}
+		],
+		"stream": false
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(reqBody))
+	req.Header.Set("anthropic-version", "2023-06-01")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("Codex tool 形态请求失败 status=%d body=%s", w.Code, w.Body.String())
+	}
+	if *imgCalls != 1 {
+		t.Errorf("图片模型应被调用1次, 实际 %d", *imgCalls)
+	}
+	if *mainCalls != 1 {
+		t.Errorf("上游应被调用1次, 实际 %d", *mainCalls)
 	}
 }

@@ -90,6 +90,9 @@ func HandleResponses(c *gin.Context) {
 }
 
 // processImagesForInput 遍历 input, 识别所有图片并用文本描述替换/追加
+// 兼容三种 content 形态:
+//   - 数组(标准 content array): 直接图片项 + tool_result 内嵌字符串图片
+//   - 字符串(Codex role=tool 输出等): 解析 JSON 后递归识别
 func processImagesForInput(g *modelGroupRuntime, input json.RawMessage) (hasImage bool, imgCount int, imgModelUsed string, modified []byte, err error) {
 	if len(input) == 0 {
 		return false, 0, "", input, nil
@@ -109,6 +112,20 @@ func processImagesForInput(g *modelGroupRuntime, input json.RawMessage) (hasImag
 	client := sharedHTTPClient
 
 	for i := range arr {
+		// 1. 字符串 content(Codex role=tool 等): 走递归处理器
+		if s, ok := arr[i]["content"].(string); ok && s != "" {
+			newStr, hasImg, cnt, used, perr := processImagesInStringContent(g, s)
+			if perr != nil {
+				return hasImage || hasImg, imgCount + cnt, used, input, perr
+			}
+			if hasImg {
+				hasImage = true
+				imgCount += cnt
+				imgModelUsed = used
+				arr[i]["content"] = newStr
+			}
+			continue
+		}
 		cont, ok := arr[i]["content"].([]interface{})
 		if !ok {
 			continue
@@ -121,6 +138,36 @@ func processImagesForInput(g *modelGroupRuntime, input json.RawMessage) (hasImag
 				continue
 			}
 			typ, _ := cm["type"].(string)
+			// 2. tool_result / tool_use 项: 内嵌 content 递归处理
+			if typ == "tool_result" || typ == "tool_use" {
+				if sub, ok := cm["content"].([]interface{}); ok {
+					newV, r := processImagesInValue(g, sub)
+					if r.err != nil {
+						return hasImage || r.hasImage, imgCount + r.imgCount, r.imgModel, input, r.err
+					}
+					if r.hasImage {
+						hasImage = true
+						imgCount += r.imgCount
+						if r.imgModel != "" {
+							imgModelUsed = r.imgModel
+						}
+						cm["content"] = newV
+					}
+				} else if ss, ok := cm["content"].(string); ok && ss != "" {
+					newStr, hasImg, cnt, used, perr := processImagesInStringContent(g, ss)
+					if perr != nil {
+						return hasImage || hasImg, imgCount + cnt, used, input, perr
+					}
+					if hasImg {
+						hasImage = true
+						imgCount += cnt
+						imgModelUsed = used
+						cm["content"] = newStr
+					}
+				}
+				continue
+			}
+			// 3. 直接图片项(OpenAI image_url / Responses input_image / Claude image)
 			if typ != "input_image" && typ != "image" && typ != "image_url" {
 				continue
 			}

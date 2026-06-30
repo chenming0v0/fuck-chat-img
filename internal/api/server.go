@@ -43,6 +43,7 @@ func SetupRouter() *gin.Engine {
 	api := r.Group("/api")
 	api.GET("/status", Status)
 	api.POST("/login", Login)
+	api.POST("/setup", Setup) // 首次设置管理员(仅在无任何用户时可用)
 
 	// ===== OpenAI 兼容代理接口 (使用模型组名作为访问凭证, /v1/models 需鉴权) =====
 	v1 := r.Group("/v1")
@@ -50,8 +51,11 @@ func SetupRouter() *gin.Engine {
 	v1.GET("/models", proxy.HandleModels)
 	v1.POST("/responses", proxy.HandleResponses)
 	v1.POST("/chat/completions", proxy.HandleChat)
+	// Anthropic Claude 兼容代理
+	v1.POST("/messages", proxy.HandleMessages)
 	// 兼容别名
 	v1.POST("/responses/", proxy.HandleResponses)
+	v1.POST("/messages/", proxy.HandleMessages)
 
 	// ===== 需登录的管理接口 =====
 	authed := api.Group("")

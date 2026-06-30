@@ -59,6 +59,12 @@ export function login(payload) {
   return instance.post('/login', payload)
 }
 
+// 2.1 首次设置管理员账户(仅在无任何用户时可用)
+export function setup(payload) {
+  // payload: { username, password }
+  return instance.post('/setup', payload)
+}
+
 // 3. 获取当前用户
 export function getUser() {
   return instance.get('/user')

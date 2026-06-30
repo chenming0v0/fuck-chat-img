@@ -1,9 +1,11 @@
 package model
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/fuck-chat-img/fci/internal/config"
 	"golang.org/x/crypto/bcrypt"
@@ -33,26 +35,27 @@ func Init() error {
 	}
 	DB = db
 
-	// 初始化管理员账户
-	if err := initAdmin(); err != nil {
+	// 不再创建默认密码账户; 首次启动时由用户在 Web 设置页输入管理密码
+	// 若通过 FCI_ADMIN_USER / FCI_ADMIN_PASS 环境变量预置, 则在 initAdminFromEnv 中创建
+	if err := initAdminFromEnv(); err != nil {
 		return err
 	}
 	return nil
 }
 
-func initAdmin() error {
+// initAdminFromEnv 若设置了 FCI_ADMIN_USER + FCI_ADMIN_PASS 环境变量,
+// 并且当前没有任何用户, 则按环境变量创建管理员(便于自动化部署/容器化场景)
+func initAdminFromEnv() error {
 	cfg := config.Get()
+	if cfg.InitAdminPass == "" {
+		return nil
+	}
 	var count int64
 	DB.Model(&User{}).Count(&count)
 	if count > 0 {
-		// 已存在账户: 若设置了初始密码环境变量则不覆盖
 		return nil
 	}
-	plain := cfg.InitAdminPass
-	if plain == "" {
-		plain = "123456"
-	}
-	hash, err := bcrypt.GenerateFromPassword([]byte(plain), bcrypt.DefaultCost)
+	hash, err := bcrypt.GenerateFromPassword([]byte(cfg.InitAdminPass), bcrypt.DefaultCost)
 	if err != nil {
 		return err
 	}
@@ -65,7 +68,44 @@ func initAdmin() error {
 	if err := DB.Create(&u).Error; err != nil {
 		return err
 	}
-	log.Printf("[fci] 初始管理员账户已创建: %s / %s (请尽快修改密码)", cfg.AdminUser, plain)
+	log.Printf("[fci] 已通过环境变量创建管理员账户: %s", cfg.AdminUser)
+	return nil
+}
+
+// IsSetupRequired 判断是否需要进行首次管理员设置(没有任何用户时返回 true)
+func IsSetupRequired() bool {
+	var count int64
+	DB.Model(&User{}).Count(&count)
+	return count == 0
+}
+
+// SetupAdmin 首次设置管理员账户(仅在没有任何用户时可用)
+// username / password 由用户在前端设置页输入
+func SetupAdmin(username, password string) error {
+	if !IsSetupRequired() {
+		return fmt.Errorf("管理员账户已存在, 无需再次设置")
+	}
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return fmt.Errorf("用户名不能为空")
+	}
+	if len(password) < 6 {
+		return fmt.Errorf("密码至少 6 位")
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+	u := User{
+		Username:     username,
+		PasswordHash: string(hash),
+		Role:         "admin",
+		Status:       1,
+	}
+	if err := DB.Create(&u).Error; err != nil {
+		return err
+	}
+	log.Printf("[fci] 首次设置完成, 管理员账户已创建: %s", username)
 	return nil
 }
 

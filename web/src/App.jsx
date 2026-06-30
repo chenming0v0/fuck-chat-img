@@ -4,6 +4,7 @@ import { AuthProvider, ProtectedRoute, AdminRoute } from '@/helpers/auth'
 import { ThemeProvider } from '@/context/Theme'
 import PageLayout from '@/components/layout/PageLayout'
 import Login from '@/pages/Login'
+import Setup from '@/pages/Setup'
 import Dashboard from '@/pages/Dashboard'
 import ModelGroup from '@/pages/ModelGroup'
 import ModelPlaza from '@/pages/ModelPlaza'
@@ -38,6 +39,7 @@ export default function App() {
       <AuthProvider>
         <Routes>
           <Route path="/login" element={<Login />} />
+          <Route path="/setup" element={<Setup />} />
           <Route path="/" element={<Navigate to="/console" replace />} />
           <Route
             path="/console"

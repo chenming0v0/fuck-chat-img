@@ -4,20 +4,31 @@ import { Card, Form, Button as SemiButton, Divider } from '@douyinfe/semi-ui'
 import { IconMail, IconLock } from '@douyinfe/semi-icons'
 import { Boxes, ArrowRight } from 'lucide-react'
 import { toast } from 'react-toastify'
-import { login } from '@/helpers/api'
+import { login, getStatus } from '@/helpers/api'
 import { useAuth } from '@/helpers/auth'
 
 // 登录页：复刻 newapi 登录布局
+// 若 /api/status 返回 need_setup=true(无任何用户), 自动跳转到 /setup
 export default function Login() {
   const navigate = useNavigate()
   const { isAuthenticated, login: doLogin } = useAuth()
   const [loading, setLoading] = useState(false)
 
-  // 已登录则直接跳控制台
   useEffect(() => {
     if (isAuthenticated) {
       navigate('/console', { replace: true })
+      return
     }
+    // 检查是否需要首次设置管理员
+    getStatus()
+      .then((res) => {
+        if (res?.success && res?.data?.need_setup) {
+          navigate('/setup', { replace: true })
+        }
+      })
+      .catch(() => {
+        // 忽略: 即使状态检查失败也允许走登录流程
+      })
   }, [isAuthenticated, navigate])
 
   async function handleSubmit(values) {

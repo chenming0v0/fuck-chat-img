@@ -95,14 +95,16 @@ func ChangePassword(c *gin.Context) {
 }
 
 // Status 公开状态(前端启动检查)
+// need_setup=true 表示当前没有任何用户, 前端应跳转到 /setup 引导用户设置管理密码
 func Status(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"data": gin.H{
-			"version":         "1.0.0",
-			"name":            "fuck-chat-img",
-			"require_auth":    true,
-			"server_time":     time.Now().Unix(),
+			"version":      "1.0.0",
+			"name":         "fuck-chat-img",
+			"require_auth": true,
+			"need_setup":   model.IsSetupRequired(),
+			"server_time":  time.Now().Unix(),
 		},
 	})
 }

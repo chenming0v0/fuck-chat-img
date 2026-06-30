@@ -80,6 +80,9 @@ func HandleChat(c *gin.Context) {
 }
 
 // processImagesForMessages 处理 chat messages 中的图片
+// 兼容三种 content 形态:
+//   - 数组(标准 content array): 直接图片项 + tool_result 内嵌字符串图片
+//   - 字符串(Codex role=tool 输出): 解析 JSON 后递归识别
 func processImagesForMessages(g *modelGroupRuntime, messages json.RawMessage) (hasImage bool, imgCount int, imgModelUsed string, modified []byte, err error) {
 	var arr []map[string]interface{}
 	if err := json.Unmarshal(messages, &arr); err != nil {
@@ -87,6 +90,20 @@ func processImagesForMessages(g *modelGroupRuntime, messages json.RawMessage) (h
 	}
 	client := sharedHTTPClient
 	for i := range arr {
+		// 1. 字符串 content(Codex role=tool 等): 走递归处理器
+		if s, ok := arr[i]["content"].(string); ok && s != "" {
+			newStr, hasImg, cnt, used, perr := processImagesInStringContent(g, s)
+			if perr != nil {
+				return hasImage || hasImg, imgCount + cnt, used, messages, perr
+			}
+			if hasImg {
+				hasImage = true
+				imgCount += cnt
+				imgModelUsed = used
+				arr[i]["content"] = newStr
+			}
+			continue
+		}
 		cont, ok := arr[i]["content"].([]interface{})
 		if !ok {
 			continue
@@ -99,7 +116,37 @@ func processImagesForMessages(g *modelGroupRuntime, messages json.RawMessage) (h
 				continue
 			}
 			typ, _ := cm["type"].(string)
-			if typ != "image_url" && typ != "input_image" && typ != "image" {
+			// 2. tool_result 项: 内嵌 content 可能是 JSON 字符串或数组, 递归处理
+			if typ == "tool_result" || typ == "tool_use" {
+				if sub, ok := cm["content"].([]interface{}); ok {
+					newV, r := processImagesInValue(g, sub)
+					if r.err != nil {
+						return hasImage || r.hasImage, imgCount + r.imgCount, r.imgModel, messages, r.err
+					}
+					if r.hasImage {
+						hasImage = true
+						imgCount += r.imgCount
+						if r.imgModel != "" {
+							imgModelUsed = r.imgModel
+						}
+						cm["content"] = newV
+					}
+				} else if ss, ok := cm["content"].(string); ok && ss != "" {
+					newStr, hasImg, cnt, used, perr := processImagesInStringContent(g, ss)
+					if perr != nil {
+						return hasImage || hasImg, imgCount + cnt, used, messages, perr
+					}
+					if hasImg {
+						hasImage = true
+						imgCount += cnt
+						imgModelUsed = used
+						cm["content"] = newStr
+					}
+				}
+				continue
+			}
+			// 3. 直接图片项(OpenAI image_url / Responses input_image / Claude image)
+			if !isImageContentItem(cm) {
 				continue
 			}
 			url, b64, ok := extractImageRef(cm)

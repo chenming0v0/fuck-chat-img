@@ -13,15 +13,30 @@ import (
 )
 
 // imageContentHash 计算图片内容的稳定哈希, 用于缓存键
-// 支持 url / base64 / file_id 形式
+// 支持 url / base64 / file_id 形式, 以及 Claude 的 source.data 格式
+// 注意: 仅按"图片实际内容"哈希, 不区分外层包裹格式(相同图片任意格式产生相同哈希)
 func imageContentHash(c map[string]interface{}) string {
 	h := sha256.New()
-	// type 也纳入哈希以区分不同结构
+	// 提取真实图片内容后再哈希(忽略外层 type/字段名差异)
+	url, b64, ok := extractImageRef(c)
+	if ok {
+		if url != "" {
+			h.Write([]byte("url:"))
+			h.Write([]byte(url))
+		}
+		if b64 != "" {
+			// b64 可能是 data URL 或纯 base64, 统一抽取纯 base64 部分
+			raw := stripDataURLPrefix(b64)
+			h.Write([]byte("b64:"))
+			h.Write([]byte(raw))
+		}
+		return hex.EncodeToString(h.Sum(nil))[:32]
+	}
+	// 兜底: 没有可识别图片字段时, 对整个对象做 canonical 哈希
 	if t, ok := c["type"].(string); ok {
 		h.Write([]byte(t))
 	}
-	// 各种可能字段
-	for _, k := range []string{"image_url", "url", "image", "data", "file_id", "detail"} {
+	for _, k := range []string{"image_url", "url", "image", "data", "file_id", "detail", "source"} {
 		if v, ok := c[k]; ok {
 			b, _ := json.Marshal(v)
 			h.Write([]byte(k))
@@ -31,20 +46,48 @@ func imageContentHash(c map[string]interface{}) string {
 	return hex.EncodeToString(h.Sum(nil))[:32]
 }
 
+// stripDataURLPrefix 从 data:image/...;base64,XXX 中提取纯 base64 部分
+// 若不是 data URL 则原样返回
+func stripDataURLPrefix(s string) string {
+	if !strings.HasPrefix(s, "data:") {
+		return s
+	}
+	// data:image/png;base64,XXXX
+	if i := strings.Index(s, ","); i >= 0 {
+		return s[i+1:]
+	}
+	return s
+}
+
 // extractImageRef 从 content item 提取图片引用(优先 url, 其次 base64 data URL)
+// 支持 OpenAI Chat(image_url)、Responses(input_image)、Claude(image, source) 等格式
+//
+// 关键: 任何形如 "data:image/...;base64,XXX" 的值都返回为 b64(而非 url),
+// 这样相同图片无论以 OpenAI image_url.url / Codex 字符串内 data URL / Claude source.data
+// 哪种形式出现, 都会经 imageContentHash 写入 "b64:<纯base64>" 而产生相同哈希,
+// 进而保证跨格式缓存命中(用户强调: "一定要把缓存给我做好").
 func extractImageRef(c map[string]interface{}) (url string, b64 string, ok bool) {
 	if u, has := c["image_url"]; has {
 		switch v := u.(type) {
 		case string:
+			if strings.HasPrefix(v, "data:") {
+				return "", v, true
+			}
 			return v, "", true
 		case map[string]interface{}:
 			if su, ok2 := v["url"].(string); ok2 {
+				if strings.HasPrefix(su, "data:") {
+					return "", su, true
+				}
 				return su, "", true
 			}
 		}
 	}
 	if u, has := c["url"]; has {
 		if s, ok2 := u.(string); ok2 {
+			if strings.HasPrefix(s, "data:") {
+				return "", s, true
+			}
 			return s, "", true
 		}
 	}
@@ -64,7 +107,41 @@ func extractImageRef(c map[string]interface{}) (url string, b64 string, ok bool)
 			return s, "", true
 		}
 	}
+	// Claude 格式: {type: image, source: {type: base64|url, media_type, data|url}}
+	if src, has := c["source"]; has {
+		if m, ok2 := src.(map[string]interface{}); ok2 {
+			st, _ := m["type"].(string)
+			switch st {
+			case "base64":
+				if data, _ := m["data"].(string); data != "" {
+					mt, _ := m["media_type"].(string)
+					if mt == "" {
+						mt = "image/png"
+					}
+					return "", "data:" + mt + ";base64," + data, true
+				}
+			case "url":
+				if u, _ := m["url"].(string); u != "" {
+					return u, "", true
+				}
+			}
+		}
+	}
 	return "", "", false
+}
+
+// isImageContentItem 判断 map 是否为图片 content item(任意已知格式)
+func isImageContentItem(c map[string]interface{}) bool {
+	typ, _ := c["type"].(string)
+	switch typ {
+	case "image_url", "input_image", "image":
+		return true
+	}
+	// source 字段是 Claude 图片标志
+	if _, has := c["source"]; has {
+		return true
+	}
+	return false
 }
 
 // ImageModelsConfig 图片模型配置(运行时使用)
