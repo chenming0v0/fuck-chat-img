@@ -270,6 +270,16 @@ go build -o bin/fuck-chat-img .
 
 ---
 
+## ⚠️ AI 生成声明
+
+> **本项目完全由 AI（GLM-5.2）生成，请谨慎辨别使用。**
+>
+> 代码、文档、配置均未经人工逐行审查，可能存在逻辑缺陷、安全隐患或与最新上游 API 不兼容的情况。生产环境使用前请务必自行充分测试与审计。
+>
+> 如发现问题或有改进建议，**欢迎提交 PR**：https://github.com/chenming0v0/fuck-chat-img/pulls
+
+---
+
 ## License
 
 MIT
