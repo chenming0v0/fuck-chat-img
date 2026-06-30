@@ -13,10 +13,10 @@ import {
   Spin,
   Divider,
   Typography,
+  Toast,
 } from '@douyinfe/semi-ui'
 import { Plus, Search, Pencil, Trash2, Boxes } from 'lucide-react'
 import dayjs from 'dayjs'
-import { toast } from 'react-toastify'
 import CardPro from '@/components/common/ui/CardPro'
 import {
   listGroups,
@@ -86,7 +86,7 @@ export default function ModelGroup() {
         setTotal(res.total || 0)
       }
     } catch (e) {
-      toast.error(pickMessage(e, '加载模型组列表失败'))
+      Toast.error(pickMessage(e, '加载模型组列表失败'))
     } finally {
       setLoading(false)
     }
@@ -158,11 +158,11 @@ export default function ModelGroup() {
         setFormValues(vals)
         setImageModels(vals.image_models)
       } else {
-        toast.error(res?.message || '加载详情失败')
+        Toast.error(res?.message || '加载详情失败')
         setModalVisible(false)
       }
     } catch (e) {
-      toast.error(pickMessage(e, '加载详情失败'))
+      Toast.error(pickMessage(e, '加载详情失败'))
       setModalVisible(false)
     } finally {
       setModalLoading(false)
@@ -174,13 +174,13 @@ export default function ModelGroup() {
     try {
       const res = await toggleGroup(row.id)
       if (res?.success) {
-        toast.success(res.data?.enabled ? '已启用' : '已停用')
+        Toast.success(res.data?.enabled ? '已启用' : '已停用')
         refresh()
       } else {
-        toast.error(res?.message || '切换失败')
+        Toast.error(res?.message || '切换失败')
       }
     } catch (e) {
-      toast.error(pickMessage(e, '切换失败'))
+      Toast.error(pickMessage(e, '切换失败'))
     }
   }
 
@@ -193,13 +193,13 @@ export default function ModelGroup() {
         try {
           const res = await deleteGroup(row.id)
           if (res?.success) {
-            toast.success('已删除')
+            Toast.success('已删除')
             refresh()
           } else {
-            toast.error(res?.message || '删除失败')
+            Toast.error(res?.message || '删除失败')
           }
         } catch (e) {
-          toast.error(pickMessage(e, '删除失败'))
+          Toast.error(pickMessage(e, '删除失败'))
         }
       },
     })
@@ -212,7 +212,7 @@ export default function ModelGroup() {
   function removeImageModel(idx) {
     setImageModels((prev) => {
       if (prev.length <= 1) {
-        toast.warn('至少需要 1 个图片模型')
+        Toast.warning('至少需要 1 个图片模型')
         return prev
       }
       return prev.filter((_, i) => i !== idx)
@@ -254,11 +254,11 @@ export default function ModelGroup() {
     }
 
     if (!payload.name) {
-      toast.error('请填写名称')
+      Toast.error('请填写名称')
       return
     }
     if (!payload.image_models.length) {
-      toast.error('至少需要 1 个图片模型')
+      Toast.error('至少需要 1 个图片模型')
       return
     }
 
@@ -271,14 +271,14 @@ export default function ModelGroup() {
         res = await createGroup(payload)
       }
       if (res?.success) {
-        toast.success(editingId ? '已更新' : '已创建')
+        Toast.success(editingId ? '已更新' : '已创建')
         setModalVisible(false)
         refresh()
       } else {
-        toast.error(res?.message || '保存失败')
+        Toast.error(res?.message || '保存失败')
       }
     } catch (e) {
-      toast.error(pickMessage(e, '保存失败'))
+      Toast.error(pickMessage(e, '保存失败'))
     } finally {
       setModalLoading(false)
     }

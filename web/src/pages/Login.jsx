@@ -1,9 +1,8 @@
 import React, { useEffect, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
-import { Card, Form, Button as SemiButton, Divider } from '@douyinfe/semi-ui'
+import { Card, Form, Button as SemiButton, Divider, Toast } from '@douyinfe/semi-ui'
 import { IconMail, IconLock } from '@douyinfe/semi-icons'
 import { Boxes, ArrowRight } from 'lucide-react'
-import { toast } from 'react-toastify'
 import { login, getStatus, pickMessage } from '@/helpers/api'
 import { useAuth } from '@/helpers/auth'
 
@@ -44,10 +43,10 @@ export default function Login() {
         doLogin(res.data)
         navigate('/console', { replace: true })
       } else {
-        toast.error(res?.message || '登录失败')
+        Toast.error(res?.message || '登录失败')
       }
     } catch (e) {
-      toast.error(pickMessage(e, '登录失败'))
+      Toast.error(pickMessage(e, '登录失败'))
     } finally {
       setLoading(false)
     }

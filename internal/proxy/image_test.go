@@ -422,7 +422,7 @@ func TestCacheHit_SameImageDifferentFormats(t *testing.T) {
 
 	// 写入缓存后第二次应命中
 	cache.Init()
-	cache.Put(key1, groupName, []byte(`{"cached":true}`))
+	cache.PutWithMeta(key1, groupName, []byte(`{"cached":true}`), false, 0, "")
 	if _, ok := cache.Get(key2); !ok {
 		t.Errorf("第二次请求(同图片不同格式)应命中缓存, 但未命中(用户强调: 缓存要做好)")
 	}

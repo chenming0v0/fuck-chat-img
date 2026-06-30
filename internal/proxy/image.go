@@ -160,10 +160,15 @@ func recognizeImage(imgModels []UpstreamModelRT, strategy string, prompt string,
 	var lastErr error
 	for _, m := range imgModels {
 		desc, err := callImageModel(m, prompt, imageURL, imageB64, client)
-		if err == nil && strings.TrimSpace(desc) != "" {
-			return desc, m.DisplayName(), nil
+		if err == nil {
+			if strings.TrimSpace(desc) != "" {
+				return desc, m.DisplayName(), nil
+			}
+			// err==nil 但 desc 为空: 单独构造有意义的错误, 避免 fmt.Errorf("%v", nil) 产生 "<nil>"
+			lastErr = fmt.Errorf("[%s] 返回空结果", m.DisplayName())
+		} else {
+			lastErr = fmt.Errorf("[%s] %v", m.DisplayName(), err)
 		}
-		lastErr = fmt.Errorf("[%s] %v", m.DisplayName(), err)
 		// round_robin 与 failover 的差异已在 nextImageModels(起点不同)体现,
 		// 此处统一逐个尝试直到成功; strategy 参数保留以备未来扩展.
 		_ = strategy
@@ -196,6 +201,8 @@ func callImageModel(m UpstreamModelRT, prompt string, imageURL, imageB64 string,
 	body := map[string]interface{}{
 		"model":    m.Model,
 		"messages": []map[string]interface{}{{"role": "user", "content": content}},
+		// 显式声明非流式: 部分兼容网关默认走流式会返回 text/event-stream, 导致 json.Unmarshal 失败
+		"stream": false,
 	}
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {

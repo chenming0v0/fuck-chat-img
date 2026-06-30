@@ -55,6 +55,12 @@ func initAdminFromEnv() error {
 	if err := config.ValidatePasswordStrength(cfg.InitAdminPass); err != nil {
 		return fmt.Errorf("FCI_ADMIN_PASS %w", err)
 	}
+	// 与 SetupAdmin 保持一致的用户名规范化与校验(Low-8): 此前直接用 cfg.AdminUser,
+	// 未校验空白, 可能创建出 username 为空白/默认值 "root" 的管理员, 与 Setup 流程行为不一致
+	adminUser := strings.TrimSpace(cfg.AdminUser)
+	if adminUser == "" {
+		return fmt.Errorf("FCI_ADMIN_USER 不能为空")
+	}
 	var count int64
 	DB.Model(&User{}).Count(&count)
 	if count > 0 {
@@ -65,15 +71,24 @@ func initAdminFromEnv() error {
 		return err
 	}
 	u := User{
-		Username:     cfg.AdminUser,
+		Username:     adminUser,
 		PasswordHash: string(hash),
 		Role:         "admin",
 		Status:       1,
 	}
 	if err := DB.Create(&u).Error; err != nil {
+		// Low-9: 唯一约束冲突不应阻断启动(并发初始化/旧数据残留都可能触发).
+		// 与 SetupAdmin 一致地视为"已存在, 跳过"而非致命错误
+		if errors.Is(err, gorm.ErrDuplicatedKey) || isUniqueConstraintErr(err) {
+			log.Printf("[fci] 管理员账户 %s 已存在, 跳过创建", adminUser)
+			return nil
+		}
 		return err
 	}
-	log.Printf("[fci] 已通过环境变量创建管理员账户: %s", cfg.AdminUser)
+	log.Printf("[fci] 已通过环境变量创建管理员账户: %s", adminUser)
+	// Low-6: 创建完成后清零内存中的明文密码引用, 减少常驻内存暴露面
+	// (Go 字符串不可变无法真正擦除底层字节, 但消除 cfg.InitAdminPass 这一稳定引用)
+	cfg.InitAdminPass = ""
 	return nil
 }
 

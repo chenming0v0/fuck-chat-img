@@ -1,7 +1,13 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"log"
+	"net/http"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/fuck-chat-img/fci/internal/api"
 	"github.com/fuck-chat-img/fci/internal/cache"
@@ -19,9 +25,47 @@ func main() {
 
 	r := api.SetupRouter()
 	cfg := config.Get()
-	log.Printf("[fuck-chat-img] 监听 %s", cfg.ListenAddr)
-	log.Printf("[fuck-chat-img] Web UI: http://localhost%s  代理端点: /v1/responses /v1/chat/completions", cfg.ListenAddr)
-	if err := r.Run(cfg.ListenAddr); err != nil {
-		log.Fatalf("[fci] 启动失败: %v", err)
+
+	// 优雅关闭: 捕获 SIGINT/SIGTERM, 给正在进行的流式 SSE 请求留足时间收尾,
+	// 避免被 SIGKILL 直接切断导致上游写入未完成 / 客户端收到截断响应.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	srv := &http.Server{
+		Addr:    cfg.ListenAddr,
+		Handler: r,
 	}
+
+	serverErr := make(chan error, 1)
+	go func() {
+		log.Printf("[fuck-chat-img] 监听 %s", cfg.ListenAddr)
+		log.Printf("[fuck-chat-img] Web UI: http://localhost%s  代理端点: /v1/responses /v1/chat/completions", cfg.ListenAddr)
+		serverErr <- srv.ListenAndServe()
+	}()
+
+	select {
+	case err := <-serverErr:
+		// Server 自行退出(罕见). http.ErrServerClosed 是 Shutdown 引起的正常退出, 其余视为致命.
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("[fci] 启动失败: %v", err)
+		}
+		return
+	case <-ctx.Done():
+		log.Printf("[fci] 收到退出信号, 正在优雅关闭...")
+		// stop() 释放信号订阅; 此后再收到 SIGINT/SIGTERM 将采用默认行为(强制退出).
+		stop()
+	}
+
+	// 给流式请求最多 30s 收尾; 超时后强制断开剩余连接.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("[fci] 优雅关闭超时或出错: %v", err)
+	}
+
+	// 关闭数据库连接, 确保待写入事务落盘(GORM 没有显式 Close, 取底层 *sql.DB 关闭).
+	if sqlDB, err := model.DB.DB(); err == nil {
+		_ = sqlDB.Close()
+	}
+	log.Printf("[fci] 已退出")
 }

@@ -66,7 +66,9 @@ func HandleMessages(c *gin.Context) {
 			cache.RecordHit()
 			replayCacheEntry(c, e)
 			outSummary := cacheHitOutputSummary(e)
-			recordMessagesHistory(reqID, userID, grp, &req, e.HasImage, true, true, e.ImageModelUsed, grp.MainText.DisplayName(), e.ImageCount, 0, 0, time.Since(start), outSummary, "cache hit")
+			// 从缓存条目提取真实 usage, 避免历史 token 统计恒为 0
+			pt, ct := usageFromCacheEntry(e)
+			recordMessagesHistory(reqID, userID, grp, &req, e.HasImage, true, true, e.ImageModelUsed, grp.MainText.DisplayName(), e.ImageCount, pt, ct, time.Since(start), outSummary, "cache hit")
 			return
 		}
 		cache.RecordMiss()
@@ -168,7 +170,8 @@ func applyMessagesAuthHeaders(httpReq *http.Request, g *modelGroupRuntime, c *gi
 }
 
 func handleMessagesNonStream(c *gin.Context, g *modelGroupRuntime, body []byte, reqID string, userID uint, req *messagesRequest, hasImage bool, imgCount int, imgModelUsed string, cacheKey string, start time.Time) {
-	httpReq, err := http.NewRequest(http.MethodPost, g.MainText.MessagesURL(), bytes.NewReader(body))
+	// 传播客户端 context: 客户端断连时取消上游请求, 避免 token 浪费
+	httpReq, err := http.NewRequestWithContext(c.Request.Context(), http.MethodPost, g.MainText.MessagesURL(), bytes.NewReader(body))
 	if err != nil {
 		recordMessagesHistory(reqID, userID, g, req, hasImage, false, false, imgModelUsed, "", imgCount, 0, 0, time.Since(start), nil, err.Error())
 		writeAnthropicErr(c, http.StatusInternalServerError, err.Error(), "api_error")
@@ -198,7 +201,8 @@ func handleMessagesNonStream(c *gin.Context, g *modelGroupRuntime, body []byte, 
 }
 
 func handleMessagesStream(c *gin.Context, g *modelGroupRuntime, body []byte, reqID string, userID uint, req *messagesRequest, hasImage bool, imgCount int, imgModelUsed string, cacheKey string, start time.Time) {
-	httpReq, err := http.NewRequest(http.MethodPost, g.MainText.MessagesURL(), bytes.NewReader(body))
+	// 传播客户端 context: 客户端断连时取消上游请求, 避免上游继续生成造成 token 浪费
+	httpReq, err := http.NewRequestWithContext(c.Request.Context(), http.MethodPost, g.MainText.MessagesURL(), bytes.NewReader(body))
 	if err != nil {
 		recordMessagesHistory(reqID, userID, g, req, hasImage, false, false, imgModelUsed, "", imgCount, 0, 0, time.Since(start), nil, err.Error())
 		writeAnthropicErr(c, http.StatusInternalServerError, err.Error(), "api_error")
@@ -207,7 +211,7 @@ func handleMessagesStream(c *gin.Context, g *modelGroupRuntime, body []byte, req
 	applyMessagesAuthHeaders(httpReq, g, c)
 	httpReq.Header.Set("Accept", "text/event-stream")
 
-	// 流式必须使用 sharedStreamHTTPClient(更长超时), 否则长 SSE 流会被 RequestTimeout 切断
+	// 流式必须使用 sharedStreamHTTPClient(不设整体 Timeout, 避免长 SSE 被切断)
 	resp, err := sharedStreamHTTPClient.Do(httpReq)
 	if err != nil {
 		recordMessagesHistory(reqID, userID, g, req, hasImage, false, false, imgModelUsed, "", imgCount, 0, 0, time.Since(start), nil, err.Error())
@@ -230,14 +234,21 @@ func handleMessagesStream(c *gin.Context, g *modelGroupRuntime, body []byte, req
 
 	var collected [][]byte
 	var pt, ct int
+	clientDisconnected := false
 	reader := bufio.NewReaderSize(resp.Body, 64*1024)
 	for {
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
 			// 真流式: 收到一行立即写出并 Flush, 不缓冲
-			c.Writer.Write(line)
+			_, werr := c.Writer.Write(line)
 			if flusher != nil {
 				flusher.Flush()
+			}
+			// 检测客户端断连: 写入错误或 context 取消都意味着客户端已离开,
+			// 必须立即停止读上游, 避免上游空跑浪费 token + 把未送达响应写入缓存
+			if clientGone(c, werr) {
+				clientDisconnected = true
+				break
 			}
 			collected = append(collected, line)
 			if bytes.HasPrefix(bytes.TrimSpace(line), []byte("data:")) {
@@ -248,13 +259,15 @@ func handleMessagesStream(c *gin.Context, g *modelGroupRuntime, body []byte, req
 			break
 		}
 	}
-	if flusher != nil {
+	if flusher != nil && !clientDisconnected {
 		flusher.Flush()
 	}
-	if cache.Enabled() && len(collected) > 0 {
+	// 仅在客户端完整接收(未断连)时写入缓存, 防止"用户中途取消的响应"污染缓存
+	if cache.Enabled() && len(collected) > 0 && !clientDisconnected {
 		cache.PutStreamWithMeta(cacheKey, g.Name, collected, hasImage, imgCount, imgModelUsed)
 	}
-	recordMessagesHistory(reqID, userID, g, req, hasImage, true, false, imgModelUsed, g.MainText.DisplayName(), imgCount, pt, ct, time.Since(start), nil, "")
+	// 客户端断连时标记 success=false, 避免历史记录误报成功
+	recordMessagesHistory(reqID, userID, g, req, hasImage, !clientDisconnected, false, imgModelUsed, g.MainText.DisplayName(), imgCount, pt, ct, time.Since(start), nil, clientDisconnectedMsg(clientDisconnected))
 }
 
 // extractUsageMessages 从 Claude 非流式响应中提取 token 用量

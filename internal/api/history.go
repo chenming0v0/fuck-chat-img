@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/fuck-chat-img/fci/internal/auth"
 	"github.com/fuck-chat-img/fci/internal/cache"
 	"github.com/fuck-chat-img/fci/internal/model"
 	"github.com/gin-gonic/gin"
@@ -28,36 +27,51 @@ func ListHistory(c *gin.Context) {
 	success := c.Query("success")
 	cacheHit := c.Query("cache_hit")
 
-	q := model.DB.Model(&model.History{})
-	// 用户隔离: 非管理员只能查看自己的历史
-	if isAdmin, _ := c.Get(auth.ContextKeyAdmin); isAdmin != true {
-		uid, _ := c.Get(auth.ContextKeyUserID)
-		if userID, ok := uid.(uint); ok {
+	// 用户隔离: 非管理员只能查看自己的历史.
+	// 防御性写法: 若 context 中缺少 UserID(中间件不变量被破坏), 直接 403 拒绝,
+	// 而不是回落到 user_id=0 暴露匿名代理历史(Low-8 越权风险).
+	userID, ok := currentUserID(c)
+	if !ok {
+		c.JSON(http.StatusForbidden, gin.H{"success": false, "message": "无权访问"})
+		return
+	}
+	isAdmin := isAdminContext(c)
+
+	// applyFilters: 把过滤条件应用到给定 session, 避免复用同一 *gorm.DB 链
+	// 导致 Count/Find 的 SELECT 子句相互污染(M1, 与 HistoryStats 一致的做法).
+	applyFilters := func(q *gorm.DB) *gorm.DB {
+		if !isAdmin {
 			q = q.Where("user_id = ?", userID)
-		} else {
-			q = q.Where("user_id = ?", 0)
 		}
-	}
-	if keyword != "" {
-		q = q.Where("request_id LIKE ? OR input_summary LIKE ? OR output_summary LIKE ? OR error_message LIKE ?",
-			"%"+keyword+"%", "%"+keyword+"%", "%"+keyword+"%", "%"+keyword+"%")
-	}
-	if group != "" {
-		q = q.Where("model_group = ?", group)
-	}
-	if success == "true" {
-		q = q.Where("success = ?", true)
-	} else if success == "false" {
-		q = q.Where("success = ?", false)
-	}
-	if cacheHit == "true" {
-		q = q.Where("cache_hit = ?", true)
+		if keyword != "" {
+			q = q.Where("request_id LIKE ? OR input_summary LIKE ? OR output_summary LIKE ? OR error_message LIKE ?",
+				"%"+keyword+"%", "%"+keyword+"%", "%"+keyword+"%", "%"+keyword+"%")
+		}
+		if group != "" {
+			q = q.Where("model_group = ?", group)
+		}
+		if success == "true" {
+			q = q.Where("success = ?", true)
+		} else if success == "false" {
+			q = q.Where("success = ?", false)
+		}
+		if cacheHit == "true" {
+			q = q.Where("cache_hit = ?", true)
+		}
+		return q
 	}
 
 	var total int64
-	q.Count(&total)
+	if err := applyFilters(model.DB.Session(&gorm.Session{}).Model(&model.History{})).Count(&total).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": err.Error()})
+		return
+	}
 	var list []model.History
-	q.Order("id DESC").Offset((page - 1) * size).Limit(size).Find(&list)
+	if err := applyFilters(model.DB.Session(&gorm.Session{}).Model(&model.History{})).
+		Order("id DESC").Offset((page - 1) * size).Limit(size).Find(&list).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": err.Error()})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"data":    list,
@@ -69,17 +83,20 @@ func ListHistory(c *gin.Context) {
 
 // GetHistory 单条历史详情(非管理员只能查看自己的)
 func GetHistory(c *gin.Context) {
-	id, _ := strconv.Atoi(c.Param("id"))
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id < 1 {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "非法 id"})
+		return
+	}
 	var h model.History
 	if err := model.DB.First(&h, id).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"success": false, "message": "记录不存在"})
 		return
 	}
-	// 用户隔离: 非管理员不能查看他人记录
-	if isAdmin, _ := c.Get(auth.ContextKeyAdmin); isAdmin != true {
-		uid, _ := c.Get(auth.ContextKeyUserID)
-		userID, _ := uid.(uint)
-		if h.UserID != userID {
+	// 用户隔离: 非管理员不能查看他人记录(包括匿名代理历史 user_id=0)
+	if !isAdminContext(c) {
+		userID, ok := currentUserID(c)
+		if !ok || h.UserID != userID {
 			c.JSON(http.StatusForbidden, gin.H{"success": false, "message": "无权查看该记录"})
 			return
 		}
@@ -89,7 +106,11 @@ func GetHistory(c *gin.Context) {
 
 // DeleteHistory 删除单条
 func DeleteHistory(c *gin.Context) {
-	id, _ := strconv.Atoi(c.Param("id"))
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id < 1 {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "非法 id"})
+		return
+	}
 	if err := model.DB.Delete(&model.History{}, id).Error; err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
 		return
@@ -112,41 +133,43 @@ func ClearHistory(c *gin.Context) {
 // 避免复用同一 *gorm.DB 链导致的 Where/Select 残留污染(GORM v2 经典 footgun,
 // 连续 Count/Scan 复用同一链时 SELECT 子句会相互干扰, 导致统计错误).
 func HistoryStats(c *gin.Context) {
-	var total, successCount, failCount, cacheHitCount int64
 	now := time.Now()
 	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+
+	// 用户隔离: 缺 UserID 直接 403, 不回落 user_id=0 暴露匿名代理历史
+	userID, ok := currentUserID(c)
+	if !ok {
+		c.JSON(http.StatusForbidden, gin.H{"success": false, "message": "无权访问"})
+		return
+	}
+	isAdmin := isAdminContext(c)
 
 	// baseScope: 仅返回带用户隔离 Where 的查询构造器, 不携带任何 SELECT/额外条件
 	baseScope := func() *gorm.DB {
 		q := model.DB.Session(&gorm.Session{}).Model(&model.History{})
-		if isAdmin, _ := c.Get(auth.ContextKeyAdmin); isAdmin != true {
-			uid, _ := c.Get(auth.ContextKeyUserID)
-			if userID, ok := uid.(uint); ok {
-				return q.Where("user_id = ?", userID)
-			}
-			return q.Where("user_id = ?", 0)
+		if !isAdmin {
+			return q.Where("user_id = ?", userID)
 		}
 		return q
 	}
 
+	var total, successCount, failCount, cacheHitCount, todayCount int64
 	baseScope().Count(&total)
 	baseScope().Where("success = ?", true).Count(&successCount)
 	baseScope().Where("success = ?", false).Count(&failCount)
 	baseScope().Where("cache_hit = ?", true).Count(&cacheHitCount)
-
-	var todayCount int64
 	baseScope().Where("created_at >= ?", today).Count(&todayCount)
 
 	var avgLatency float64
 	type avgRes struct{ Avg float64 }
 	var ar avgRes
-	baseScope().Select("COALESCE(AVG(latency_ms),0) as avg").Scan(&ar)
+	_ = baseScope().Select("COALESCE(AVG(latency_ms),0) as avg").Scan(&ar).Error
 	avgLatency = ar.Avg
 
 	var totalTokens int64
 	type tokRes struct{ Sum int64 }
 	var tr tokRes
-	baseScope().Select("COALESCE(SUM(total_tokens),0) as sum").Scan(&tr)
+	_ = baseScope().Select("COALESCE(SUM(total_tokens),0) as sum").Scan(&tr).Error
 	totalTokens = tr.Sum
 
 	c.JSON(http.StatusOK, gin.H{

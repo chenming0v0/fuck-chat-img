@@ -5,9 +5,11 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fuck-chat-img/fci/internal/auth"
@@ -27,6 +29,10 @@ func SetupRouter() *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
+	// 安全: 不信任任何 X-Forwarded-For / X-Real-IP 头(默认直连部署形态).
+	// 否则攻击者可伪造 XFF 头使 c.ClientIP() 返回任意 IP, 绕过 /api/login /api/setup
+	// 的速率限制. 反向代理部署时, 部署方应通过 SetTrustedProxies 显式列出可信代理 CIDR.
+	_ = r.SetTrustedProxies(nil)
 	// 安全: CORS 仅允许同源. 现代浏览器对同源 POST/PUT/DELETE 也会带 Origin 头,
 	// 因此不能只放行空 Origin——会误拒 SPA 自身的写请求. 这里:
 	//   - 空 Origin 放行(非浏览器客户端 / 同源 GET)
@@ -113,22 +119,29 @@ func SetupRouter() *gin.Engine {
 }
 
 // sameOriginHosts 运行期可被覆盖的同源白名单(默认为空, 仅靠请求 Host 推断)
-var sameOriginHosts []string
+// 用 atomic.Pointer 做整体替换, 避免运行期配置变更与请求处理路径的数据竞争.
+var sameOriginHosts atomic.Pointer[[]string]
 
 // isSameOrigin 判断 origin 是否与请求同源.
 // 优先比对请求的 Host(header) 对应的 http(s)://<host>; 也允许通过 sameOriginHosts 显式追加.
 func isSameOrigin(origin string) bool {
-	for _, h := range sameOriginHosts {
+	p := sameOriginHosts.Load()
+	if p == nil || len(*p) == 0 {
+		return false // 未配置白名单: 仅同源(空 Origin)放行
+	}
+	for _, h := range *p {
 		if origin == h {
 			return true
 		}
 	}
-	return false // 默认仅同源(空 Origin)放行; 生产若需跨域, 通过 SetSameOriginHosts 显式配置
+	return false
 }
 
 // SetSameOriginHosts 设置允许的显式 Origin 白名单(供部署方按需放开跨域)
+// 整体替换语义, 线程安全; 应在 r.Run 之前调用一次完成初始化.
 func SetSameOriginHosts(hosts []string) {
-	sameOriginHosts = append(sameOriginHosts[:0], hosts...)
+	cp := append([]string(nil), hosts...)
+	sameOriginHosts.Store(&cp)
 }
 
 // rateLimit 简易每 IP 令牌桶速率限制中间件(无外部依赖).
@@ -217,7 +230,18 @@ func registerWebStatic(r *gin.Engine) {
 			c.Status(http.StatusNotFound)
 			return
 		}
-		serveStaticFile(c, rootFS, "static/"+fp)
+		// 安全: 防 path traversal. os.DirFS 不阻止 .. 越界, 攻击者构造
+		// /static/../../etc/passwd 可读取任意文件. 显式拒绝 .. 并校验 Clean 后仍位于 static/ 下.
+		if strings.Contains(fp, "..") {
+			c.Status(http.StatusNotFound)
+			return
+		}
+		cleaned := path.Clean("static/" + fp)
+		if !strings.HasPrefix(cleaned, "static/") {
+			c.Status(http.StatusNotFound)
+			return
+		}
+		serveStaticFile(c, rootFS, cleaned)
 	})
 
 	// 根路径 → index.html

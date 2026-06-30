@@ -1,9 +1,8 @@
 import React, { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Card, Form, Button as SemiButton, Divider, Typography, Spin } from '@douyinfe/semi-ui'
+import { Card, Form, Button as SemiButton, Divider, Typography, Spin, Toast } from '@douyinfe/semi-ui'
 import { IconUser, IconLock } from '@douyinfe/semi-icons'
 import { Boxes, ArrowRight, ShieldCheck } from 'lucide-react'
-import { toast } from 'react-toastify'
 import { setup as setupApi, getStatus, pickMessage } from '@/helpers/api'
 
 const { Text } = Typography
@@ -40,7 +39,7 @@ export default function Setup() {
   async function handleSubmit(values) {
     if (loading) return // 防止 Enter 键重复提交
     if (values.password !== values.confirmPassword) {
-      toast.error('两次输入的密码不一致')
+      Toast.error('两次输入的密码不一致')
       return
     }
     setLoading(true)
@@ -50,20 +49,20 @@ export default function Setup() {
         password: values.password,
       })
       if (res?.success) {
-        toast.success(res?.message || '设置成功, 请登录')
+        Toast.success(res?.message || '设置成功, 请登录')
         // 把刚设置的用户名带到登录页, 免去再次手敲
         navigate('/login', { replace: true, state: { username: values.username } })
       } else {
-        toast.error(res?.message || '设置失败')
+        Toast.error(res?.message || '设置失败')
       }
     } catch (e) {
       // 409 = 已有管理员(可能被并发抢占或已设置过), 跳转登录页而非卡死
       if (e?.response?.status === 409) {
-        toast.error('管理员账户已存在, 请直接登录')
+        Toast.error('管理员账户已存在, 请直接登录')
         navigate('/login', { replace: true })
         return
       }
-      toast.error(pickMessage(e, '设置失败'))
+      Toast.error(pickMessage(e, '设置失败'))
     } finally {
       setLoading(false)
     }

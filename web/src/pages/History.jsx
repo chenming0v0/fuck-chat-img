@@ -10,6 +10,7 @@ import {
   Typography,
   Pagination,
   Modal,
+  Toast,
 } from '@douyinfe/semi-ui'
 import { Eye, Trash2, Image as ImageIcon } from 'lucide-react'
 import dayjs from 'dayjs'
@@ -23,7 +24,6 @@ import {
   pickMessage,
 } from '@/helpers/api'
 import { useAuth } from '@/helpers/auth'
-import { toast } from 'react-toastify'
 
 // 历史记录页：统计条 + 筛选 + 表格 + 侧滑详情
 export default function History() {
@@ -69,7 +69,7 @@ export default function History() {
         setTotal(res.total || 0)
       }
     } catch (e) {
-      toast.error(pickMessage(e, '加载历史记录失败'))
+      Toast.error(pickMessage(e, '加载历史记录失败'))
     } finally {
       setLoading(false)
     }
@@ -129,14 +129,14 @@ export default function History() {
         try {
           const res = await deleteHistory(row.id)
           if (res?.success) {
-            toast.success('已删除')
+            Toast.success('已删除')
             refresh()
             refreshStats()
           } else {
-            toast.error(res?.message || '删除失败')
+            Toast.error(res?.message || '删除失败')
           }
         } catch (e) {
-          toast.error(pickMessage(e, '删除失败'))
+          Toast.error(pickMessage(e, '删除失败'))
         }
       },
     })
@@ -150,15 +150,15 @@ export default function History() {
         try {
           const res = await clearHistory()
           if (res?.success) {
-            toast.success('已清空')
+            Toast.success('已清空')
             setPage(1)
             refresh()
             refreshStats()
           } else {
-            toast.error(res?.message || '清空失败')
+            Toast.error(res?.message || '清空失败')
           }
         } catch (e) {
-          toast.error(pickMessage(e, '清空失败'))
+          Toast.error(pickMessage(e, '清空失败'))
         }
       },
     })

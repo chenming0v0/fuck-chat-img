@@ -48,5 +48,7 @@ vet: ensure-dist
 fmt:
 	go fmt ./...
 
+# 注意: clean 不删除 data/ (用户 SQLite 数据库), 误删会导致全部账户/模型组/历史丢失.
+# 如需清空数据重新走 /setup 流程, 请显式 `rm -rf data`.
 clean:
-	rm -rf bin web/dist web/node_modules data
+	rm -rf bin web/dist web/node_modules

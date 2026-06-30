@@ -13,6 +13,11 @@ import (
 // MinPasswordLength 全项目统一的密码最小长度(Setup / ChangePassword / initAdminFromEnv 共用)
 const MinPasswordLength = 6
 
+// MaxPasswordLength 全项目统一的密码最大长度.
+// bcrypt 会对超过 72 字节的密码静默截断只取前 72 字节, 两个前 72 位相同的长密码哈希一致,
+// 削弱安全边际. 这里在入口处统一拒绝超长密码, 避免静默截断(Low-7).
+const MaxPasswordLength = 72
+
 // Config 全局配置
 type Config struct {
 	ListenAddr     string
@@ -96,6 +101,9 @@ func randomSecret(n int) string {
 func ValidatePasswordStrength(password string) error {
 	if len(password) < MinPasswordLength {
 		return errors.New("密码至少 " + strconv.Itoa(MinPasswordLength) + " 位")
+	}
+	if len(password) > MaxPasswordLength {
+		return errors.New("密码不能超过 " + strconv.Itoa(MaxPasswordLength) + " 位(bcrypt 限制)")
 	}
 	return nil
 }

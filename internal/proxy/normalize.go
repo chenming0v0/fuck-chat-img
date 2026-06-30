@@ -31,6 +31,15 @@ import (
 
 // outputAffectingKeys 参与缓存键的"影响输出的请求级参数"白名单
 // (messages/input/system 等内容字段不在此列, 它们走各自的 normalizeForCache)
+//
+// 该白名单必须覆盖所有会改变上游输出的请求级参数, 否则会出现"参数不同的两个请求
+// 命中同一缓存返回错误响应"的硬伤(AGENTS.md 强调). 已纳入:
+//   - 采样/解码参数: temperature, top_p, top_k, stop, seed, max_tokens, ...
+//   - 工具相关: tools, tool_choice, parallel_tool_calls
+//   - 输出形态: n, response_format, reasoning
+//   - 偏置: frequency_penalty, presence_penalty, logit_bias, logprobs, top_logprobs
+//   - 服务端状态依赖: previous_response_id, prompt_cache_key, store, include
+//   - 系统指令: instructions(Responses), system 已由调用方规范化进 contentCanonical
 var outputAffectingKeys = []string{
 	"stream",
 	"stream_options",
@@ -44,9 +53,22 @@ var outputAffectingKeys = []string{
 	"stop_sequences",
 	"tools",
 	"tool_choice",
+	"parallel_tool_calls",
 	"reasoning",
 	"response_format",
 	"seed",
+	"n",
+	"frequency_penalty",
+	"presence_penalty",
+	"logit_bias",
+	"logprobs",
+	"top_logprobs",
+	// 以下字段依赖上游服务端状态或显著影响输出, 必须纳入缓存键
+	"instructions",
+	"previous_response_id",
+	"prompt_cache_key",
+	"store",
+	"include",
 }
 
 // paramsFingerprint 从原始请求体提取影响输出的参数, 返回确定性字节串

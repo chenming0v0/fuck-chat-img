@@ -1,6 +1,5 @@
 import React, { useState } from 'react'
-import { Form, Button, RadioGroup, Radio } from '@douyinfe/semi-ui'
-import { toast } from 'react-toastify'
+import { Form, Button, RadioGroup, Radio, Toast } from '@douyinfe/semi-ui'
 import CardPro from '@/components/common/ui/CardPro'
 import { changePassword, pickMessage } from '@/helpers/api'
 import { useTheme } from '@/context/Theme'
@@ -17,23 +16,23 @@ export default function Settings() {
     if (loading) return
     const { old_password, new_password, confirm } = values
     if (new_password !== confirm) {
-      toast.error('两次输入的新密码不一致')
+      Toast.error('两次输入的新密码不一致')
       return
     }
     if (!new_password || new_password.length < MIN_PASSWORD_LEN) {
-      toast.error(`新密码至少 ${MIN_PASSWORD_LEN} 位`)
+      Toast.error(`新密码至少 ${MIN_PASSWORD_LEN} 位`)
       return
     }
     setLoading(true)
     try {
       const res = await changePassword({ old_password, new_password })
       if (res?.success) {
-        toast.success('密码修改成功')
+        Toast.success('密码修改成功')
       } else {
-        toast.error(res?.message || '修改失败')
+        Toast.error(res?.message || '修改失败')
       }
     } catch (e) {
-      toast.error(pickMessage(e, '修改失败'))
+      Toast.error(pickMessage(e, '修改失败'))
     } finally {
       setLoading(false)
     }

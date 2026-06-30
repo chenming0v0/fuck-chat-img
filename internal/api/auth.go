@@ -26,7 +26,7 @@ func Login(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "用户名或密码错误"})
 		return
 	}
-	token, err := auth.GenerateToken(u)
+	token, expiresAt, err := auth.GenerateToken(u)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "生成令牌失败"})
 		return
@@ -38,7 +38,7 @@ func Login(c *gin.Context) {
 			"token":      token,
 			"username":   u.Username,
 			"role":       u.Role,
-			"expires_at": time.Now().Add(7 * 24 * time.Hour).Unix(),
+			"expires_at": expiresAt.Unix(),
 		},
 	})
 }
@@ -108,4 +108,26 @@ func Status(c *gin.Context) {
 			"server_time":  time.Now().Unix(),
 		},
 	})
+}
+
+// currentUserID 从 gin.Context 提取已登录用户 ID.
+// 返回 (0, false) 表示 context 中缺少 UserID(中间件不变量被破坏), 调用方应 403 拒绝.
+// 不再回落到 user_id=0 查询, 避免暴露匿名代理历史(Low-8 越权风险).
+func currentUserID(c *gin.Context) (uint, bool) {
+	v, exists := c.Get(auth.ContextKeyUserID)
+	if !exists {
+		return 0, false
+	}
+	uid, ok := v.(uint)
+	return uid, ok
+}
+
+// isAdminContext 判断当前请求是否为管理员
+func isAdminContext(c *gin.Context) bool {
+	v, exists := c.Get(auth.ContextKeyAdmin)
+	if !exists {
+		return false
+	}
+	isAdmin, ok := v.(bool)
+	return ok && isAdmin
 }

@@ -7,7 +7,7 @@ import SiderBar from './SiderBar'
 const { Header, Sider, Content } = Layout
 
 // 三段式固定布局：Header + Sider + Content
-// 注意: ToastContainer 已提升到 index.jsx 最外层, 保证 /login /setup 等独立路由也能显示提示.
+// 提示统一用 Semi UI Toast(自带挂载容器), 无需在此处放 ToastContainer.
 export default function PageLayout() {
   const [collapsed, setCollapsed] = useState(false)
 

@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Tag, Spin, Empty } from '@douyinfe/semi-ui'
+import { Tag, Spin, Empty, Toast } from '@douyinfe/semi-ui'
 import {
   Activity,
   CheckCircle2,
@@ -15,7 +15,6 @@ import {
 import CardPro from '@/components/common/ui/CardPro'
 import { historyStats, pickMessage } from '@/helpers/api'
 import { useAuth } from '@/helpers/auth'
-import { toast } from 'react-toastify'
 
 // 仪表盘：展示历史统计与模型组广场入口
 export default function Dashboard() {
@@ -33,7 +32,7 @@ export default function Dashboard() {
           setStats(res.data)
         }
       } catch (e) {
-        if (active) toast.error(pickMessage(e, '加载统计数据失败'))
+        if (active) Toast.error(pickMessage(e, '加载统计数据失败'))
       } finally {
         if (active) setLoading(false)
       }

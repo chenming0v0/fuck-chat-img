@@ -1,7 +1,6 @@
 import React, { useEffect, useState } from 'react'
-import { Tag, Spin, Empty, Typography } from '@douyinfe/semi-ui'
+import { Tag, Spin, Empty, Typography, Toast } from '@douyinfe/semi-ui'
 import { Boxes } from 'lucide-react'
-import { toast } from 'react-toastify'
 import CardPro from '@/components/common/ui/CardPro'
 import { listGroups, pickMessage } from '@/helpers/api'
 
@@ -20,7 +19,7 @@ export default function ModelPlaza() {
           setGroups((res.data || []).filter((g) => g.enabled))
         }
       } catch (e) {
-        if (active) toast.error(pickMessage(e, '加载模型列表失败'))
+        if (active) Toast.error(pickMessage(e, '加载模型列表失败'))
       } finally {
         if (active) setLoading(false)
       }

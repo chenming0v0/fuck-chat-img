@@ -67,7 +67,9 @@ func HandleResponses(c *gin.Context) {
 			cache.RecordHit()
 			replayCacheEntry(c, e)
 			outSummary := cacheHitOutputSummary(e)
-			recordHistory(reqID, userID, grp, &req, e.HasImage, true, true, e.ImageModelUsed, grp.MainText.DisplayName(), e.ImageCount, 0, 0, time.Since(start), outSummary, "cache hit")
+			// 从缓存条目提取真实 usage, 避免历史 token 统计恒为 0
+			pt, ct := usageFromCacheEntry(e)
+			recordHistory(reqID, userID, grp, &req, e.HasImage, true, true, e.ImageModelUsed, grp.MainText.DisplayName(), e.ImageCount, pt, ct, time.Since(start), outSummary, "cache hit")
 			return
 		}
 		cache.RecordMiss()
@@ -126,7 +128,8 @@ func processImagesForInput(g *modelGroupRuntime, input json.RawMessage) (hasImag
 		if s, ok := arr[i]["content"].(string); ok && s != "" {
 			newStr, hasImg, cnt, used, perr := processImagesInStringContentCfg(g, s, cfg)
 			if perr != nil {
-				return hasImage || hasImg, imgCount + cnt, used, input, perr
+				// 失败时优先保留前面已累计的 imgModelUsed, 避免被本次失败的空值覆盖
+				return hasImage || hasImg, imgCount + cnt, pickImgModel(imgModelUsed, used), input, perr
 			}
 			if hasImg {
 				hasImage = true
@@ -153,7 +156,7 @@ func processImagesForInput(g *modelGroupRuntime, input json.RawMessage) (hasImag
 				if sub, ok := cm["content"].([]interface{}); ok {
 					newV, r := processImagesInValueCfg(g, sub, cfg)
 					if r.err != nil {
-						return hasImage || r.hasImage, imgCount + r.imgCount, r.imgModel, input, r.err
+						return hasImage || r.hasImage, imgCount + r.imgCount, pickImgModel(imgModelUsed, r.imgModel), input, r.err
 					}
 					if r.hasImage {
 						hasImage = true
@@ -166,7 +169,7 @@ func processImagesForInput(g *modelGroupRuntime, input json.RawMessage) (hasImag
 				} else if ss, ok := cm["content"].(string); ok && ss != "" {
 					newStr, hasImg, cnt, used, perr := processImagesInStringContentCfg(g, ss, cfg)
 					if perr != nil {
-						return hasImage || hasImg, imgCount + cnt, used, input, perr
+						return hasImage || hasImg, imgCount + cnt, pickImgModel(imgModelUsed, used), input, perr
 					}
 					if hasImg {
 						hasImage = true
@@ -190,7 +193,7 @@ func processImagesForInput(g *modelGroupRuntime, input json.RawMessage) (hasImag
 			imgs := nextImageModels(g)
 			desc, used, e := recognizeImage(imgs, g.ImageStrategy, g.ImagePrompt, url, b64, client)
 			if e != nil {
-				return hasImage, imgCount, used, input, e
+				return hasImage, imgCount, pickImgModel(imgModelUsed, used), input, e
 			}
 			imgModelUsed = used
 			textItem := map[string]interface{}{
@@ -237,7 +240,8 @@ func rebuildResponsesBody(raw json.RawMessage, newInput []byte, g *modelGroupRun
 }
 
 func handleResponsesNonStream(c *gin.Context, g *modelGroupRuntime, body []byte, reqID string, userID uint, req *responsesRequest, hasImage bool, imgCount int, imgModelUsed string, cacheKey string, start time.Time) {
-	httpReq, err := http.NewRequest(http.MethodPost, g.MainText.ResponsesURL(), bytes.NewReader(body))
+	// 传播客户端 context: 客户端断连时取消上游请求, 避免 token 浪费
+	httpReq, err := http.NewRequestWithContext(c.Request.Context(), http.MethodPost, g.MainText.ResponsesURL(), bytes.NewReader(body))
 	if err != nil {
 		recordHistory(reqID, userID, g, req, hasImage, false, false, imgModelUsed, "", imgCount, 0, 0, time.Since(start), nil, err.Error())
 		writeErr(c, http.StatusInternalServerError, err.Error())
@@ -267,7 +271,8 @@ func handleResponsesNonStream(c *gin.Context, g *modelGroupRuntime, body []byte,
 }
 
 func handleResponsesStream(c *gin.Context, g *modelGroupRuntime, body []byte, reqID string, userID uint, req *responsesRequest, hasImage bool, imgCount int, imgModelUsed string, cacheKey string, start time.Time) {
-	httpReq, err := http.NewRequest(http.MethodPost, g.MainText.ResponsesURL(), bytes.NewReader(body))
+	// 传播客户端 context: 客户端断连时取消上游请求, 避免上游继续生成造成 token 浪费
+	httpReq, err := http.NewRequestWithContext(c.Request.Context(), http.MethodPost, g.MainText.ResponsesURL(), bytes.NewReader(body))
 	if err != nil {
 		recordHistory(reqID, userID, g, req, hasImage, false, false, imgModelUsed, "", imgCount, 0, 0, time.Since(start), nil, err.Error())
 		writeErr(c, http.StatusInternalServerError, err.Error())
@@ -276,7 +281,7 @@ func handleResponsesStream(c *gin.Context, g *modelGroupRuntime, body []byte, re
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "text/event-stream")
 	httpReq.Header.Set("Authorization", "Bearer "+g.MainText.APIKey)
-	// 流式必须使用 sharedStreamHTTPClient(更长超时)
+	// 流式必须使用 sharedStreamHTTPClient(不设整体 Timeout, 避免长 SSE 被切断)
 	resp, err := sharedStreamHTTPClient.Do(httpReq)
 	if err != nil {
 		recordHistory(reqID, userID, g, req, hasImage, false, false, imgModelUsed, "", imgCount, 0, 0, time.Since(start), nil, err.Error())
@@ -299,14 +304,21 @@ func handleResponsesStream(c *gin.Context, g *modelGroupRuntime, body []byte, re
 
 	var collected [][]byte
 	var pt, ct int
+	clientDisconnected := false
 	reader := bufio.NewReaderSize(resp.Body, 64*1024)
 	for {
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
 			// 真流式: 收到一行立即写出并 Flush
-			c.Writer.Write(line)
+			_, werr := c.Writer.Write(line)
 			if flusher != nil {
 				flusher.Flush()
+			}
+			// 检测客户端断连: 写入错误或 context 取消都意味着客户端已离开,
+			// 必须立即停止读上游, 避免上游空跑浪费 token + 把未送达响应写入缓存
+			if clientGone(c, werr) {
+				clientDisconnected = true
+				break
 			}
 			collected = append(collected, line)
 			if bytes.HasPrefix(bytes.TrimSpace(line), []byte("data:")) {
@@ -317,16 +329,21 @@ func handleResponsesStream(c *gin.Context, g *modelGroupRuntime, body []byte, re
 			break
 		}
 	}
-	if flusher != nil {
+	if flusher != nil && !clientDisconnected {
 		flusher.Flush()
 	}
-	if cache.Enabled() && len(collected) > 0 {
+	// 仅在客户端完整接收(未断连)时写入缓存, 防止"用户中途取消的响应"污染缓存
+	if cache.Enabled() && len(collected) > 0 && !clientDisconnected {
 		cache.PutStreamWithMeta(cacheKey, g.Name, collected, hasImage, imgCount, imgModelUsed)
 	}
-	recordHistory(reqID, userID, g, req, hasImage, true, false, imgModelUsed, g.MainText.DisplayName(), imgCount, pt, ct, time.Since(start), nil, "")
+	// 客户端断连时标记 success=false, 避免历史记录误报成功
+	recordHistory(reqID, userID, g, req, hasImage, !clientDisconnected, false, imgModelUsed, g.MainText.DisplayName(), imgCount, pt, ct, time.Since(start), nil, clientDisconnectedMsg(clientDisconnected))
 }
 
 // updateUsageFromSSE 从 SSE data 行提取 usage
+// 兼容 OpenAI(prompt_tokens/completion_tokens)与 Anthropic(input_tokens/output_tokens),
+// 并把 Anthropic 的 prompt caching 字段(cache_creation_input_tokens/cache_read_input_tokens)
+// 计入 prompt_tokens, 与非流式 extractUsageMessages 保持一致.
 func updateUsageFromSSE(line []byte, pt, ct int) (int, int) {
 	s := strings.TrimSpace(string(line))
 	if !strings.HasPrefix(s, "data:") {
@@ -341,19 +358,30 @@ func updateUsageFromSSE(line []byte, pt, ct int) (int, int) {
 	if err := json.Unmarshal([]byte(s), &obj); err != nil {
 		return pt, ct
 	}
-	if u, ok := obj["usage"].(map[string]interface{}); ok {
-		if v, ok := u["input_tokens"].(float64); ok {
-			pt = int(v)
-		}
-		if v, ok := u["output_tokens"].(float64); ok {
-			ct = int(v)
-		}
-		if v, ok := u["prompt_tokens"].(float64); ok {
-			pt = int(v)
-		}
-		if v, ok := u["completion_tokens"].(float64); ok {
-			ct = int(v)
-		}
+	u, ok := obj["usage"].(map[string]interface{})
+	if !ok {
+		return pt, ct
+	}
+	// OpenAI 风格
+	if v, ok := u["prompt_tokens"].(float64); ok {
+		pt = int(v)
+	}
+	if v, ok := u["completion_tokens"].(float64); ok {
+		ct = int(v)
+	}
+	// Anthropic 风格(若同时存在则覆盖 OpenAI 值, Anthropic SDK 不发 prompt_tokens)
+	if v, ok := u["input_tokens"].(float64); ok {
+		pt = int(v)
+	}
+	if v, ok := u["output_tokens"].(float64); ok {
+		ct = int(v)
+	}
+	// Anthropic prompt caching 字段计入 input(与非流式 extractUsageMessages 一致)
+	if v, ok := u["cache_creation_input_tokens"].(float64); ok {
+		pt += int(v)
+	}
+	if v, ok := u["cache_read_input_tokens"].(float64); ok {
+		pt += int(v)
 	}
 	return pt, ct
 }
@@ -386,6 +414,7 @@ func extractUsage(b []byte) (int, int) {
 
 // replayCacheEntry 回放缓存条目(区分流式/非流式)
 // 流式命中时逐事件 Flush, 保持真流式语义; 非流式命中直接返回 JSON.
+// 回放过程中检测客户端断连, 及时停止, 避免客户端已离开仍 CPU/IO 空跑.
 func replayCacheEntry(c *gin.Context, e *cache.Entry) {
 	if e.IsStream {
 		c.Writer.Header().Set("Content-Type", "text/event-stream")
@@ -394,9 +423,16 @@ func replayCacheEntry(c *gin.Context, e *cache.Entry) {
 		c.Writer.Header().Set("X-Accel-Buffering", "no")
 		flusher, _ := c.Writer.(http.Flusher)
 		for _, ev := range e.StreamEvents {
-			c.Writer.Write(ev)
+			// 客户端已断连则停止回放, 节省 CPU/IO
+			if clientGone(c, nil) {
+				return
+			}
+			_, werr := c.Writer.Write(ev)
 			if flusher != nil {
 				flusher.Flush()
+			}
+			if werr != nil {
+				return
 			}
 		}
 		if flusher != nil {
@@ -425,6 +461,30 @@ func cacheHitOutputSummary(e *cache.Entry) []byte {
 		}
 	}
 	return []byte(truncate(sb.String(), 2000))
+}
+
+// usageFromCacheEntry 从缓存条目提取 token 用量, 避免缓存命中时历史 token 统计恒为 0.
+// 非流式: 直接从 Value 解析; 流式: 遍历 StreamEvents 用 updateUsageFromSSE 累计.
+// 解析失败返回 (0, 0), 不影响缓存回放本身.
+func usageFromCacheEntry(e *cache.Entry) (int, int) {
+	if e == nil {
+		return 0, 0
+	}
+	if !e.IsStream {
+		// 非流式优先用 messages 协议的提取(兼容 cache_creation_input_tokens);
+		// 若解析结果为 0, 回退到通用 extractUsage(兼容 OpenAI prompt_tokens)
+		pt, ct := extractUsageMessages(e.Value)
+		if pt == 0 && ct == 0 {
+			return extractUsage(e.Value)
+		}
+		return pt, ct
+	}
+	// 流式: 遍历所有 SSE 事件累计 usage
+	pt, ct := 0, 0
+	for _, ev := range e.StreamEvents {
+		pt, ct = updateUsageFromSSE(ev, pt, ct)
+	}
+	return pt, ct
 }
 
 // writeErr 写 OpenAI 风格错误(用于 chat / responses 端点)

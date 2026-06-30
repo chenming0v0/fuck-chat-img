@@ -11,6 +11,10 @@ import (
 )
 
 // Entry 缓存条目
+//
+// 不可变契约(M9): Get 返回的 *Entry 中所有字段(Value/StreamEvents 等)必须视为只读.
+// 调用方若对 slice 做原地修改会污染缓存中所有后续读者(共享底层数组).
+// 当前调用方(replayCacheEntry/cacheHitOutputSummary/usageFromCacheEntry)均只读.
 type Entry struct {
 	Key       string
 	Value     []byte // 完整响应体(非流式)或合并后的流式事件序列(用于回放)
@@ -29,12 +33,16 @@ type Entry struct {
 type Store struct {
 	mu       sync.RWMutex
 	items    map[string]*Entry
-	order    []string // 简单 LRU 顺序
+	order    []string // LRU 顺序(头部=最久未用, 尾部=最近使用)
 	maxItems int
+	ttl      time.Duration // 条目生存期, 0 表示不限
 	enabled  bool
 }
 
 var store *Store
+
+// 默认缓存 TTL: 上游模型若升级/重训/调整行为, 旧响应不应被无限期回放(M8)
+const defaultCacheTTL = 24 * time.Hour
 
 // Init 初始化缓存
 func Init() {
@@ -42,6 +50,7 @@ func Init() {
 	store = &Store{
 		items:    make(map[string]*Entry),
 		maxItems: cfg.CacheMaxItems,
+		ttl:      defaultCacheTTL,
 		enabled:  cfg.CacheEnabled,
 	}
 }
@@ -62,6 +71,7 @@ func Key(modelGroup string, canonicalInput []byte) string {
 }
 
 // Get 读取缓存(LRU: 命中时将条目移到最近使用位置)
+// TTL: 命中但已过期的条目视为未命中并删除, 避免无限期返回陈旧响应(M8)
 func Get(key string) (*Entry, bool) {
 	if store == nil || !store.enabled {
 		return nil, false
@@ -70,6 +80,11 @@ func Get(key string) (*Entry, bool) {
 	defer store.mu.Unlock()
 	e, ok := store.items[key]
 	if !ok {
+		return nil, false
+	}
+	// 过期检查: 命中但超过 TTL 视为未命中, 删除条目并返回 miss
+	if store.ttl > 0 && time.Since(e.CreatedAt) > store.ttl {
+		store.deleteLocked(key)
 		return nil, false
 	}
 	e.HitCount++
@@ -89,15 +104,15 @@ func (s *Store) touchLocked(key string) {
 	}
 }
 
-// Put 写入缓存(非流式)
-func Put(key, modelName string, value []byte) {
-	putEntry(key, &Entry{
-		Key:       key,
-		Value:     value,
-		IsStream:  false,
-		ModelName: modelName,
-		CreatedAt: time.Now(),
-	})
+// deleteLocked 删除指定 key(调用方持锁), 同步清理 order 切片
+func (s *Store) deleteLocked(key string) {
+	delete(s.items, key)
+	for i, k := range s.order {
+		if k == key {
+			s.order = append(s.order[:i], s.order[i+1:]...)
+			return
+		}
+	}
 }
 
 // PutWithMeta 写入缓存(非流式, 携带请求元数据用于命中回放时的历史回填)
@@ -111,17 +126,6 @@ func PutWithMeta(key, modelName string, value []byte, hasImage bool, imgCount in
 		HasImage:       hasImage,
 		ImageCount:     imgCount,
 		ImageModelUsed: imgModelUsed,
-	})
-}
-
-// PutStream 写入缓存(流式, 存事件列表用于回放)
-func PutStream(key, modelName string, events [][]byte) {
-	putEntry(key, &Entry{
-		Key:          key,
-		StreamEvents: events,
-		IsStream:     true,
-		ModelName:    modelName,
-		CreatedAt:    time.Now(),
 	})
 }
 
@@ -156,7 +160,7 @@ func putEntry(key string, e *Entry) {
 	store.items[key] = e
 }
 
-// evictLocked 淘汰超出上限的条目(FIFO, 调用方持锁)
+// evictLocked 淘汰超出上限的条目(LRU: 从 order 头部淘汰最久未用, 调用方持锁)
 func (s *Store) evictLocked() {
 	for len(s.order) > s.maxItems && len(s.order) > 0 {
 		k := s.order[0]

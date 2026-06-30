@@ -145,8 +145,10 @@ func DeleteGroup(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
 		return
 	}
-	// 清理轮询游标, 防止内存泄漏
-	proxy.CleanupRRIndex(map[string]bool{g.Name: false})
+	// 精确清理该模型组的轮询游标, 防止内存泄漏.
+	// 注意: 不能用 CleanupRRIndex({g.Name:false}) —— 该函数语义是"传入活跃集合(true), 集合外的删除",
+	// 传 {name:false} 会导致所有其它模型组的游标也被清空(H3 bug). 改用 DeleteRRIndex 精确删除单条.
+	proxy.DeleteRRIndex(g.Name)
 	c.JSON(http.StatusOK, gin.H{"success": true, "message": "已删除"})
 }
 

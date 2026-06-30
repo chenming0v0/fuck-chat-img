@@ -16,7 +16,8 @@ COPY web/ ./
 RUN if command -v bun >/dev/null 2>&1; then bun run build; else npm run build; fi
 
 # ===== Stage 2: 后端构建 =====
-FROM golang:1.23-alpine AS go-builder
+# go.mod 声明 go 1.25, 这里使用匹配的 golang 镜像(>=1.25).
+FROM golang:1.25-alpine AS go-builder
 WORKDIR /app
 # sqlite 驱动(mattn/go-sqlite3)需要 CGO + gcc
 RUN apk add --no-cache gcc musl-dev
@@ -44,4 +45,7 @@ ENV FCI_LISTEN=:8080 \
 VOLUME ["/app/data"]
 USER app
 EXPOSE 8080
+# 健康检查: /api/status 是公开接口(返回 need_setup 等), 无需鉴权; 用 alpine 自带 busybox wget, 无需额外装包.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget --spider -q http://127.0.0.1:8080/api/status || exit 1
 ENTRYPOINT ["/app/fuck-chat-img"]
