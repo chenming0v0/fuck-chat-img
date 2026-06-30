@@ -1,5 +1,6 @@
 # 二进制与数据
 /bin/
+/fci
 /data/
 *.db
 *.db-journal
