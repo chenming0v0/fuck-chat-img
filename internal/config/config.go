@@ -1,13 +1,17 @@
 package config
 
 import (
+	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"log"
 	"os"
 	"strconv"
 	"strings"
-	"time"
 )
+
+// MinPasswordLength 全项目统一的密码最小长度(Setup / ChangePassword / initAdminFromEnv 共用)
+const MinPasswordLength = 6
 
 // Config 全局配置
 type Config struct {
@@ -16,8 +20,7 @@ type Config struct {
 	WebDir         string // 前端静态资源目录
 	JWTSecret      string
 	AdminUser      string
-	AdminPass      string // bcrypt 哈希后的密码，若为空则在首次启动时使用 InitAdminPass 并写入
-	InitAdminPass  string
+	InitAdminPass  string // 通过 FCI_ADMIN_PASS 预置的明文密码(仅首次启动创建管理员时使用)
 	CacheEnabled   bool
 	CacheMaxItems  int
 	RequestTimeout int // 上游请求超时(秒)
@@ -45,7 +48,8 @@ func Load() {
 	if v := os.Getenv("FCI_DB_PATH"); v != "" {
 		cfg.DBPath = v
 	}
-	if v := os.Getenv("FCI_WEB_DIR"); v != "" {
+	// FCI_WEB_DIR: 使用 LookupEnv 区分"未设置"(用默认嵌入)与"显式设为空"(强制用嵌入)
+	if v, ok := os.LookupEnv("FCI_WEB_DIR"); ok {
 		cfg.WebDir = v
 	}
 	if v := os.Getenv("FCI_JWT_SECRET"); v != "" {
@@ -55,7 +59,7 @@ func Load() {
 		cfg.AdminUser = v
 	}
 	if v := os.Getenv("FCI_ADMIN_PASS"); v != "" {
-		// 若已像 bcrypt 哈希则直接用；否则在初始化时会被哈希
+		// 明文传入, 服务端在 initAdminFromEnv 中会 bcrypt 哈希后存储
 		cfg.InitAdminPass = v
 	}
 	if v := os.Getenv("FCI_CACHE_ENABLED"); v != "" {
@@ -71,31 +75,27 @@ func Load() {
 			cfg.RequestTimeout = n
 		}
 	}
-	// 安全: 若未配置 JWT 密钥, 生成随机密钥并警告(每次重启会变化, 导致旧 token 失效)
+	// 安全: 若未配置 JWT 密钥, 用 crypto/rand 生成随机密钥并警告(每次重启会变化, 导致旧 token 失效)
 	if cfg.JWTSecret == "" {
 		cfg.JWTSecret = randomSecret(32)
 		log.Printf("[fci] 警告: 未设置 FCI_JWT_SECRET, 已生成临时密钥。请配置 FCI_JWT_SECRET 环境变量以保持登录态稳定")
 	}
 }
 
-// randomSecret 生成随机十六进制密钥
+// randomSecret 用 crypto/rand 生成密码学安全的随机十六进制密钥
 func randomSecret(n int) string {
 	b := make([]byte, n)
-	for i := range b {
-		b[i] = byte(randInt(0, 256))
+	if _, err := rand.Read(b); err != nil {
+		// crypto/rand 失败属于无法安全运行的致命情况, 直接 panic
+		panic("[fci] crypto/rand 失败: " + err.Error())
 	}
 	return hex.EncodeToString(b)
 }
 
-func randInt(min, max int) int {
-	return min + int(randUint32())%(max-min)
-}
-
-var randCounter uint64
-
-func randUint32() uint32 {
-	// 简单的伪随机(基于纳秒), 仅用于未配置密钥时的临时生成
-	now := time.Now().UnixNano()
-	randCounter++
-	return uint32(now) ^ uint32(randCounter<<16)
+// ValidatePasswordStrength 统一密码强度校验(供 Setup / ChangePassword / initAdminFromEnv 复用)
+func ValidatePasswordStrength(password string) error {
+	if len(password) < MinPasswordLength {
+		return errors.New("密码至少 " + strconv.Itoa(MinPasswordLength) + " 位")
+	}
+	return nil
 }

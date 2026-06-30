@@ -1,18 +1,22 @@
 import React, { useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { Card, Form, Button as SemiButton, Divider } from '@douyinfe/semi-ui'
 import { IconMail, IconLock } from '@douyinfe/semi-icons'
 import { Boxes, ArrowRight } from 'lucide-react'
 import { toast } from 'react-toastify'
-import { login, getStatus } from '@/helpers/api'
+import { login, getStatus, pickMessage } from '@/helpers/api'
 import { useAuth } from '@/helpers/auth'
 
 // 登录页：复刻 newapi 登录布局
 // 若 /api/status 返回 need_setup=true(无任何用户), 自动跳转到 /setup
 export default function Login() {
   const navigate = useNavigate()
+  const location = useLocation()
   const { isAuthenticated, login: doLogin } = useAuth()
   const [loading, setLoading] = useState(false)
+
+  // 从 Setup 页跳转过来时, 可携带刚设置的用户名预填
+  const presetUsername = location.state?.username || ''
 
   useEffect(() => {
     if (isAuthenticated) {
@@ -32,6 +36,7 @@ export default function Login() {
   }, [isAuthenticated, navigate])
 
   async function handleSubmit(values) {
+    if (loading) return // 防止 Enter 键重复提交
     setLoading(true)
     try {
       const res = await login(values)
@@ -42,7 +47,7 @@ export default function Login() {
         toast.error(res?.message || '登录失败')
       }
     } catch (e) {
-      toast.error(e?.response?.data?.message || e?.message || '登录失败')
+      toast.error(pickMessage(e, '登录失败'))
     } finally {
       setLoading(false)
     }
@@ -88,6 +93,7 @@ export default function Login() {
               label="用户名"
               placeholder="请输入用户名"
               prefix={<IconMail />}
+              initValue={presetUsername}
               rules={[{ required: true, message: '请输入用户名' }]}
               showClear
             />

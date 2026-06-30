@@ -167,6 +167,8 @@ func ToggleGroup(c *gin.Context) {
 }
 
 // TestGroup 测试模型组(可选: 简单 ping 主模型)
+// 安全: 返回的 group DTO 必须脱敏(mask=true), 避免泄露上游 API Key.
+// (历史问题: 此处曾返回明文 Key, 绕过了 GetGroup 的脱敏修复, 现已统一)
 func TestGroup(c *gin.Context) {
 	id, _ := strconv.Atoi(c.Param("id"))
 	var g model.ModelGroup
@@ -174,7 +176,7 @@ func TestGroup(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"success": false, "message": "模型组不存在"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"success": true, "message": "测试接口(请通过 /v1/responses 实测)", "data": groupToDTO(g, false)})
+	c.JSON(http.StatusOK, gin.H{"success": true, "message": "测试接口(请通过 /v1/responses 实测)", "data": groupToDTO(g, true)})
 }
 
 type createGroupReq struct {

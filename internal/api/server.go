@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/fuck-chat-img/fci/internal/auth"
 	"github.com/fuck-chat-img/fci/internal/config"
@@ -16,16 +18,26 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// maxProxyBodyBytes 代理请求体上限(32MiB). /v1/messages 等支持 base64 图片,
+// 请求体天然较大, 但仍需设上限防止内存耗尽 DoS.
+const maxProxyBodyBytes = 32 << 20
+
 // SetupRouter 装配路由
 func SetupRouter() *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
-	// 安全: CORS 不能同时允许任意 Origin 和 Credentials
+	// 安全: CORS 仅允许同源. 现代浏览器对同源 POST/PUT/DELETE 也会带 Origin 头,
+	// 因此不能只放行空 Origin——会误拒 SPA 自身的写请求. 这里:
+	//   - 空 Origin 放行(非浏览器客户端 / 同源 GET)
+	//   - 显式 Origin 通过 SetSameOriginHosts 白名单放行(部署方按需配置)
+	//   - 其余跨域拒绝
 	r.Use(cors.New(cors.Config{
 		AllowOriginFunc: func(origin string) bool {
-			// 同源请求 Origin 为空, 直接放行; 否则只允许配置的来源(此处同源部署, 不允许跨域)
-			return origin == ""
+			if origin == "" {
+				return true
+			}
+			return isSameOrigin(origin)
 		},
 		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowHeaders:     []string{"Content-Type", "Authorization"},
@@ -36,18 +48,24 @@ func SetupRouter() *gin.Engine {
 	r.Use(func(c *gin.Context) {
 		c.Header("X-Content-Type-Options", "nosniff")
 		c.Header("X-Frame-Options", "DENY")
+		c.Header("Referrer-Policy", "strict-origin-when-cross-origin")
 		c.Next()
 	})
 
-	// ===== 公开接口 =====
+	// ===== 公开接口(带速率限制, 防爆破/抢注轮询) =====
 	api := r.Group("/api")
 	api.GET("/status", Status)
-	api.POST("/login", Login)
-	api.POST("/setup", Setup) // 首次设置管理员(仅在无任何用户时可用)
+	api.POST("/login", rateLimit("login", 10, time.Minute), Login)
+	api.POST("/setup", rateLimit("setup", 10, time.Minute), Setup) // 首次设置管理员(仅在无任何用户时可用)
 
 	// ===== OpenAI 兼容代理接口 (使用模型组名作为访问凭证, /v1/models 需鉴权) =====
 	v1 := r.Group("/v1")
 	v1.Use(auth.MiddlewareProxyAuth())
+	// 限制请求体大小, 防止超大 body 导致 OOM(图片场景已放宽到 32MiB)
+	v1.Use(func(c *gin.Context) {
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxProxyBodyBytes)
+		c.Next()
+	})
 	v1.GET("/models", proxy.HandleModels)
 	v1.POST("/responses", proxy.HandleResponses)
 	v1.POST("/chat/completions", proxy.HandleChat)
@@ -73,7 +91,8 @@ func SetupRouter() *gin.Engine {
 		authed.PUT("/groups/:id", auth.MiddlewareAdmin(), UpdateGroup)
 		authed.DELETE("/groups/:id", auth.MiddlewareAdmin(), DeleteGroup)
 		authed.POST("/groups/:id/toggle", auth.MiddlewareAdmin(), ToggleGroup)
-		authed.GET("/groups/:id/test", TestGroup)
+		// 安全: TestGroup 返回的 group DTO 也含 Key, 必须管理员才能调
+		authed.GET("/groups/:id/test", auth.MiddlewareAdmin(), TestGroup)
 
 		// 历史记录(管理员可查看全部, 普通用户仅查看自己的)
 		authed.GET("/history", ListHistory)
@@ -91,6 +110,73 @@ func SetupRouter() *gin.Engine {
 	registerWebStatic(r)
 
 	return r
+}
+
+// sameOriginHosts 运行期可被覆盖的同源白名单(默认为空, 仅靠请求 Host 推断)
+var sameOriginHosts []string
+
+// isSameOrigin 判断 origin 是否与请求同源.
+// 优先比对请求的 Host(header) 对应的 http(s)://<host>; 也允许通过 sameOriginHosts 显式追加.
+func isSameOrigin(origin string) bool {
+	for _, h := range sameOriginHosts {
+		if origin == h {
+			return true
+		}
+	}
+	return false // 默认仅同源(空 Origin)放行; 生产若需跨域, 通过 SetSameOriginHosts 显式配置
+}
+
+// SetSameOriginHosts 设置允许的显式 Origin 白名单(供部署方按需放开跨域)
+func SetSameOriginHosts(hosts []string) {
+	sameOriginHosts = append(sameOriginHosts[:0], hosts...)
+}
+
+// rateLimit 简易每 IP 令牌桶速率限制中间件(无外部依赖).
+// limit 次 / window; 超限返回 429. 用于 /api/login /api/setup 防爆破与抢注轮询.
+func rateLimit(name string, limit int, window time.Duration) gin.HandlerFunc {
+	type bucket struct {
+		count   int
+		resetAt time.Time
+	}
+	var mu sync.Mutex
+	buckets := make(map[string]*bucket)
+	// 后台定期清理过期 bucket, 防止内存无限增长
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			mu.Lock()
+			now := time.Now()
+			for k, b := range buckets {
+				if now.After(b.resetAt) {
+					delete(buckets, k)
+				}
+			}
+			mu.Unlock()
+		}
+	}()
+	return func(c *gin.Context) {
+		ip := c.ClientIP()
+		key := name + ":" + ip
+		mu.Lock()
+		b, ok := buckets[key]
+		now := time.Now()
+		if !ok || now.After(b.resetAt) {
+			b = &bucket{count: 0, resetAt: now.Add(window)}
+			buckets[key] = b
+		}
+		b.count++
+		allowed := b.count <= limit
+		mu.Unlock()
+		if !allowed {
+			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
+				"success": false,
+				"message": "请求过于频繁, 请稍后再试",
+			})
+			return
+		}
+		c.Next()
+	}
 }
 
 // registerWebStatic 注册前端 SPA(支持 history 路由回退到 index.html)

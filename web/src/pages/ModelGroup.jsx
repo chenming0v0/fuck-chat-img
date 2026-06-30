@@ -25,6 +25,7 @@ import {
   updateGroup,
   deleteGroup,
   toggleGroup,
+  pickMessage,
 } from '@/helpers/api'
 import { useAuth } from '@/helpers/auth'
 
@@ -60,6 +61,9 @@ export default function ModelGroup() {
   const [loading, setLoading] = useState(true)
   const [page, setPage] = useState(1)
   const [size, setSize] = useState(10)
+  // 搜索防抖: keywordInput 即时跟随输入框, keyword 防抖后用于实际请求,
+  // 避免每敲一个字就发请求, 同时防过期响应覆盖(防抖期间只发最后一次).
+  const [keywordInput, setKeywordInput] = useState('')
   const [keyword, setKeyword] = useState('')
 
   const [modalVisible, setModalVisible] = useState(false)
@@ -82,11 +86,20 @@ export default function ModelGroup() {
         setTotal(res.total || 0)
       }
     } catch (e) {
-      // 静默
+      toast.error(pickMessage(e, '加载模型组列表失败'))
     } finally {
       setLoading(false)
     }
   }
+
+  // keyword 防抖: 输入停顿 300ms 后才更新 keyword, 触发 refresh
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setKeyword(keywordInput)
+      setPage(1)
+    }, 300)
+    return () => clearTimeout(t)
+  }, [keywordInput])
 
   useEffect(() => {
     refresh()
@@ -149,7 +162,7 @@ export default function ModelGroup() {
         setModalVisible(false)
       }
     } catch (e) {
-      toast.error(e?.response?.data?.message || '加载详情失败')
+      toast.error(pickMessage(e, '加载详情失败'))
       setModalVisible(false)
     } finally {
       setModalLoading(false)
@@ -167,7 +180,7 @@ export default function ModelGroup() {
         toast.error(res?.message || '切换失败')
       }
     } catch (e) {
-      toast.error(e?.response?.data?.message || '切换失败')
+      toast.error(pickMessage(e, '切换失败'))
     }
   }
 
@@ -186,7 +199,7 @@ export default function ModelGroup() {
             toast.error(res?.message || '删除失败')
           }
         } catch (e) {
-          toast.error(e?.response?.data?.message || '删除失败')
+          toast.error(pickMessage(e, '删除失败'))
         }
       },
     })
@@ -265,7 +278,7 @@ export default function ModelGroup() {
         toast.error(res?.message || '保存失败')
       }
     } catch (e) {
-      toast.error(e?.response?.data?.message || '保存失败')
+      toast.error(pickMessage(e, '保存失败'))
     } finally {
       setModalLoading(false)
     }
@@ -441,10 +454,9 @@ export default function ModelGroup() {
                 minWidth: 180,
               }}
               placeholder="搜索名称 / 描述"
-              value={keyword}
+              value={keywordInput}
               onChange={(e) => {
-                setKeyword(e.target.value)
-                setPage(1)
+                setKeywordInput(e.target.value)
               }}
             />
           </div>

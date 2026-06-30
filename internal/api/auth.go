@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/fuck-chat-img/fci/internal/auth"
+	"github.com/fuck-chat-img/fci/internal/config"
 	"github.com/fuck-chat-img/fci/internal/model"
 	"github.com/gin-gonic/gin"
 )
@@ -83,8 +84,8 @@ func ChangePassword(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "原密码错误"})
 		return
 	}
-	if len(req.NewPassword) < 6 {
-		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "新密码至少6位"})
+	if err := config.ValidatePasswordStrength(req.NewPassword); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
 		return
 	}
 	if err := model.UpdatePassword(uid, req.NewPassword); err != nil {

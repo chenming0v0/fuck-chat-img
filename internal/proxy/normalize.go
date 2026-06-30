@@ -24,6 +24,53 @@ import (
 //   - OpenAI Responses 的 input
 //   - Anthropic Messages 的 messages
 //   - 任意嵌套深度的 tool_result / role=tool / 字符串内 JSON
+//
+// 额外: 缓存键必须区分"影响输出的请求级参数"(stream / max_tokens / temperature /
+// tools 等), 否则会出现"参数不同的两个请求命中同一缓存返回错误响应"的硬伤。
+// paramsFingerprint 负责从原始请求体提取这些参数并产出确定性指纹。
+
+// outputAffectingKeys 参与缓存键的"影响输出的请求级参数"白名单
+// (messages/input/system 等内容字段不在此列, 它们走各自的 normalizeForCache)
+var outputAffectingKeys = []string{
+	"stream",
+	"stream_options",
+	"max_tokens",
+	"max_output_tokens",
+	"max_completion_tokens",
+	"temperature",
+	"top_p",
+	"top_k",
+	"stop",
+	"stop_sequences",
+	"tools",
+	"tool_choice",
+	"reasoning",
+	"response_format",
+	"seed",
+}
+
+// paramsFingerprint 从原始请求体提取影响输出的参数, 返回确定性字节串
+// (键按白名单顺序取, 值经 canonicalizeValue 规范化后 marshal, 保证确定性)
+func paramsFingerprint(raw json.RawMessage) []byte {
+	if len(raw) == 0 {
+		return nil
+	}
+	var obj map[string]interface{}
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return nil
+	}
+	out := make(map[string]interface{}, len(outputAffectingKeys))
+	for _, k := range outputAffectingKeys {
+		if v, ok := obj[k]; ok {
+			out[k] = canonicalizeValue(v)
+		}
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		return nil
+	}
+	return b
+}
 
 // normalizeForCache 把原始 JSON 规范化为确定性字节串(用于缓存键)
 func normalizeForCache(raw json.RawMessage) []byte {
@@ -49,6 +96,16 @@ func normalizeResponsesInput(input json.RawMessage) []byte {
 // normalizeMessagesInput 规范化 Chat / Messages API 的 messages 字段
 func normalizeMessagesInput(messages json.RawMessage) []byte {
 	return normalizeForCache(messages)
+}
+
+// composeCacheCanonical 把"输出影响参数指纹"与"内容规范化结果"拼接成最终 canonical
+// 顺序固定为 params || NUL || content, 保证不同参数 / 不同内容都不会碰撞
+func composeCacheCanonical(paramsFp []byte, content []byte) []byte {
+	out := make([]byte, 0, len(paramsFp)+1+len(content))
+	out = append(out, paramsFp...)
+	out = append(out, 0)
+	out = append(out, content...)
+	return out
 }
 
 // canonicalizeValue 递归产生确定性表示

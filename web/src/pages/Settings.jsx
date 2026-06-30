@@ -1,9 +1,12 @@
 import React, { useState } from 'react'
-import { Form, Button, RadioGroup, Radio, Toast } from '@douyinfe/semi-ui'
+import { Form, Button, RadioGroup, Radio } from '@douyinfe/semi-ui'
 import { toast } from 'react-toastify'
 import CardPro from '@/components/common/ui/CardPro'
-import { changePassword } from '@/helpers/api'
+import { changePassword, pickMessage } from '@/helpers/api'
 import { useTheme } from '@/context/Theme'
+
+// 密码最小长度, 与后端 config.MinPasswordLength(6) 保持一致, 避免前后端策略不一致
+const MIN_PASSWORD_LEN = 6
 
 // 设置页：修改密码 + 主题切换
 export default function Settings() {
@@ -11,13 +14,14 @@ export default function Settings() {
   const [loading, setLoading] = useState(false)
 
   async function handleSubmit(values) {
+    if (loading) return
     const { old_password, new_password, confirm } = values
     if (new_password !== confirm) {
       toast.error('两次输入的新密码不一致')
       return
     }
-    if (!new_password || new_password.length < 4) {
-      toast.error('新密码至少 4 位')
+    if (!new_password || new_password.length < MIN_PASSWORD_LEN) {
+      toast.error(`新密码至少 ${MIN_PASSWORD_LEN} 位`)
       return
     }
     setLoading(true)
@@ -29,7 +33,7 @@ export default function Settings() {
         toast.error(res?.message || '修改失败')
       }
     } catch (e) {
-      toast.error(e?.response?.data?.message || e?.message || '修改失败')
+      toast.error(pickMessage(e, '修改失败'))
     } finally {
       setLoading(false)
     }

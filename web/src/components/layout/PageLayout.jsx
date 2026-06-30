@@ -1,13 +1,13 @@
 import React, { useState } from 'react'
 import { Layout } from '@douyinfe/semi-ui'
 import { Outlet } from 'react-router-dom'
-import { ToastContainer } from 'react-toastify'
 import HeaderBar from './HeaderBar'
 import SiderBar from './SiderBar'
 
 const { Header, Sider, Content } = Layout
 
 // 三段式固定布局：Header + Sider + Content
+// 注意: ToastContainer 已提升到 index.jsx 最外层, 保证 /login /setup 等独立路由也能显示提示.
 export default function PageLayout() {
   const [collapsed, setCollapsed] = useState(false)
 
@@ -51,19 +51,6 @@ export default function PageLayout() {
           <Outlet />
         </div>
       </Content>
-
-      {/* 全局 Toast 容器 */}
-      <ToastContainer
-        position="top-right"
-        autoClose={3000}
-        hideProgressBar={false}
-        newestOnTop
-        closeOnClick
-        pauseOnFocusLoss
-        draggable
-        pauseOnHover
-        theme="light"
-      />
     </Layout>
   )
 }

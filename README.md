@@ -28,10 +28,10 @@ UI 复刻自 [newapi](https://github.com/Calcium-Ion/new-api)（React 19 + Semi 
 | 模型组 | 创建模型组后，客户端从 `/v1/models` 拿到的就是这个组名，请求时 `model` 填它即可 |
 | 主对话模型 + 图片模型轮询 | 主对话模型只能指定 1 个；图片模型可指定多个，按 `round_robin` / `failover` 轮询 |
 | 图片识别失败直接报错 | 任一图片识别失败即返回错误，不会偷偷降级调用主模型 |
-| OpenAI Responses API | 完整支持 `/v1/responses`（含流式 SSE 回放），并兼容 `/v1/chat/completions` |
-| 绝对缓存 | LRU 缓存，对 input 数组做**确定性规范化**后计算缓存键，**乱序同语义请求也能命中**，缓存率不降 |
-| 历史记录 | 完整记录每次请求（模型组、图片数、缓存命中、Token、延迟、输入输出摘要），Web UI 可查 |
-| Web UI 鉴权 | JWT 登录后才能打开控制台与配置；管理员才能改模型组 |
+| 三协议兼容 + 真流式 | 完整支持 `/v1/responses`、`/v1/chat/completions`、`/v1/messages`（Anthropic 兼容），三协议均支持真流式 SSE（逐行 Flush，非缓冲假流式）|
+| 绝对缓存 | LRU 缓存，对 input/messages 做**确定性规范化**后计算缓存键；缓存键同时纳入 `stream`、`max_tokens`、`temperature`、`tools` 等**影响输出的参数**，避免不同参数命中同一缓存返回错误响应 |
+| 历史记录 | 完整记录每次请求（模型组、端点、用户、图片数、缓存命中、Token、延迟、输入输出摘要），Web UI 可查，按用户隔离 |
+| Web UI 鉴权 | JWT 登录后才能打开控制台与配置；管理员才能改模型组；代理接口通过 `FCI_PROXY_KEY` 或管理员 JWT 鉴权 |
 | 单二进制部署 | 前端 `go:embed` 嵌入 Go 二进制，一个文件即可运行 |
 
 ---
@@ -49,11 +49,13 @@ cd fuck-chat-img
 ./bin/fuck-chat-img
 ```
 
-打开 http://localhost:8080 ，用 `root / 123456` 登录（**首次登录后请立即在「设置」页改密码**）。
+打开 http://localhost:8080 ，首次访问会跳转到 **设置页**，由你输入管理员账号与密码（**不再有默认密码**）。设置完成后用该账户登录即可。
+
+> 生产部署推荐通过 `FCI_ADMIN_USER` + `FCI_ADMIN_PASS` 环境变量预置管理员，完全绕过首次设置页（详见 [AGENTS.md](AGENTS.md)）。
 
 ### 方式二：从源码构建
 
-需要 Go 1.25+ 和 Node 20+（推荐用 [bun](https://bun.sh)）。
+需要 Go 1.23+ 和 Node 20+（推荐用 [bun](https://bun.sh)），以及 C 编译器（gcc/musl-dev，因为 SQLite 驱动需要 CGO）。
 
 ```bash
 # 一键构建（前端 + 后端）
@@ -69,8 +71,8 @@ make all
 # 前端
 cd web && bun install && bun run build && cd ..
 
-# 后端（会把 web/dist 嵌入二进制）
-go build -o bin/fuck-chat-img .
+# 后端（会把 web/dist 嵌入二进制；CGO 供 SQLite 驱动编译）
+CGO_ENABLED=1 go build -o bin/fuck-chat-img .
 ```
 
 ### 方式三：Docker
@@ -101,12 +103,13 @@ cd web && bun run dev
 | `FCI_LISTEN` | `:8080` | 监听地址 |
 | `FCI_DB_PATH` | `./data/fci.db` | SQLite 数据库路径 |
 | `FCI_WEB_DIR` | (空) | 前端静态目录；留空则用嵌入的前端，开发时指向 `web/dist` |
-| `FCI_JWT_SECRET` | (内置,务必修改) | JWT 签名密钥 |
-| `FCI_ADMIN_USER` | `root` | 初始管理员用户名（仅首次启动生效） |
-| `FCI_ADMIN_PASS` | `123456` | 初始管理员密码（仅首次启动生效） |
+| `FCI_JWT_SECRET` | (随机生成) | JWT 签名密钥；留空则每次启动用 `crypto/rand` 随机生成（旧登录会失效） |
+| `FCI_PROXY_KEY` | (空) | 代理接口访问密钥；留空时仅管理员 JWT 可调 `/v1/*` |
+| `FCI_ADMIN_USER` | `root` | 初始管理员用户名（仅首次启动且无任何用户时生效） |
+| `FCI_ADMIN_PASS` | (空) | 初始管理员密码（明文传入，服务端 bcrypt 哈希；仅首次启动生效；至少 6 位） |
 | `FCI_CACHE_ENABLED` | `true` | 是否启用缓存 |
 | `FCI_CACHE_MAX` | `10000` | 缓存最大条目数 |
-| `FCI_REQUEST_TIMEOUT` | `300` | 上游请求超时（秒） |
+| `FCI_REQUEST_TIMEOUT` | `300` | 上游请求超时（秒）；流式请求使用 2 倍超时 |
 
 ---
 
@@ -114,7 +117,7 @@ cd web && bun run dev
 
 ### 1. 登录 Web UI
 
-打开 http://localhost:8080 ，用初始账户登录。
+打开 http://localhost:8080 。若数据库无任何用户，会跳转到设置页让你创建管理员；否则用已设置的管理员账户登录。
 
 ### 2. 创建模型组
 

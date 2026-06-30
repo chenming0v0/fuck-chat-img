@@ -1,6 +1,7 @@
 package model
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -50,6 +51,10 @@ func initAdminFromEnv() error {
 	if cfg.InitAdminPass == "" {
 		return nil
 	}
+	// 与 Setup / ChangePassword 保持一致的密码强度校验, 避免环境变量误设弱密码
+	if err := config.ValidatePasswordStrength(cfg.InitAdminPass); err != nil {
+		return fmt.Errorf("FCI_ADMIN_PASS %w", err)
+	}
 	var count int64
 	DB.Model(&User{}).Count(&count)
 	if count > 0 {
@@ -89,8 +94,8 @@ func SetupAdmin(username, password string) error {
 	if username == "" {
 		return fmt.Errorf("用户名不能为空")
 	}
-	if len(password) < 6 {
-		return fmt.Errorf("密码至少 6 位")
+	if err := config.ValidatePasswordStrength(password); err != nil {
+		return err
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
@@ -103,10 +108,23 @@ func SetupAdmin(username, password string) error {
 		Status:       1,
 	}
 	if err := DB.Create(&u).Error; err != nil {
+		// 用户名唯一约束冲突时返回友好提示
+		if errors.Is(err, gorm.ErrDuplicatedKey) || isUniqueConstraintErr(err) {
+			return fmt.Errorf("用户名 %s 已存在", username)
+		}
 		return err
 	}
 	log.Printf("[fci] 首次设置完成, 管理员账户已创建: %s", username)
 	return nil
+}
+
+// isUniqueConstraintErr 兜底识别 SQLite 的 UNIQUE 约束错误(GORM v2 对 SQLite 的 DuplicatedKey 识别不全)
+func isUniqueConstraintErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "UNIQUE constraint failed") || strings.Contains(s, "Duplicate entry")
 }
 
 // VerifyPassword 校验密码

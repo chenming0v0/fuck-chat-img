@@ -1,20 +1,44 @@
-import React, { useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Card, Form, Button as SemiButton, Divider, Typography } from '@douyinfe/semi-ui'
+import { Card, Form, Button as SemiButton, Divider, Typography, Spin } from '@douyinfe/semi-ui'
 import { IconUser, IconLock } from '@douyinfe/semi-icons'
 import { Boxes, ArrowRight, ShieldCheck } from 'lucide-react'
 import { toast } from 'react-toastify'
-import { setup as setupApi } from '@/helpers/api'
+import { setup as setupApi, getStatus, pickMessage } from '@/helpers/api'
 
 const { Text } = Typography
 
 // 首次启动设置页: 当数据库没有任何用户时, 引导用户设置管理员账号密码
 // 设置成功后自动跳转登录页
+// 反向校验: 若已存在管理员(无需 setup), 直接跳转登录页, 避免用户卡在死页
 export default function Setup() {
   const navigate = useNavigate()
   const [loading, setLoading] = useState(false)
+  const [checking, setChecking] = useState(true)
+
+  useEffect(() => {
+    let active = true
+    getStatus()
+      .then((res) => {
+        if (!active) return
+        // need_setup=false 表示已有管理员, 不应停留在设置页
+        if (res && res.data && res.data.need_setup === false) {
+          navigate('/login', { replace: true })
+        }
+      })
+      .catch(() => {
+        // 状态接口失败时不阻断, 允许尝试提交(后端会返回 409)
+      })
+      .finally(() => {
+        if (active) setChecking(false)
+      })
+    return () => {
+      active = false
+    }
+  }, [navigate])
 
   async function handleSubmit(values) {
+    if (loading) return // 防止 Enter 键重复提交
     if (values.password !== values.confirmPassword) {
       toast.error('两次输入的密码不一致')
       return
@@ -27,15 +51,30 @@ export default function Setup() {
       })
       if (res?.success) {
         toast.success(res?.message || '设置成功, 请登录')
-        navigate('/login', { replace: true })
+        // 把刚设置的用户名带到登录页, 免去再次手敲
+        navigate('/login', { replace: true, state: { username: values.username } })
       } else {
         toast.error(res?.message || '设置失败')
       }
     } catch (e) {
-      toast.error(e?.response?.data?.message || e?.message || '设置失败')
+      // 409 = 已有管理员(可能被并发抢占或已设置过), 跳转登录页而非卡死
+      if (e?.response?.status === 409) {
+        toast.error('管理员账户已存在, 请直接登录')
+        navigate('/login', { replace: true })
+        return
+      }
+      toast.error(pickMessage(e, '设置失败'))
     } finally {
       setLoading(false)
     }
+  }
+
+  if (checking) {
+    return (
+      <div className="flex items-center justify-center" style={{ minHeight: '100vh' }}>
+        <Spin size="large" />
+      </div>
+    )
   }
 
   return (

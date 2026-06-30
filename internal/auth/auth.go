@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"net/http"
@@ -64,6 +65,8 @@ func ParseToken(tokenStr string) (*Claims, error) {
 }
 
 // extractToken 从请求中提取 token (Authorization: Bearer xxx 或 query token)
+// 注意: query token 仅用于代理接口(SSE/EventSource 无法自定义 Header 场景),
+// Web UI 鉴权(MiddlewareAuth)不允许 query token, 避免长期 JWT 泄露到访问日志.
 func extractToken(c *gin.Context) string {
 	auth := c.GetHeader("Authorization")
 	if strings.HasPrefix(auth, "Bearer ") {
@@ -75,10 +78,19 @@ func extractToken(c *gin.Context) string {
 	return ""
 }
 
+// extractTokenHeaderOnly 仅从 Header 提取 token(用于 Web UI 鉴权, 避免 JWT 进日志)
+func extractTokenHeaderOnly(c *gin.Context) string {
+	auth := c.GetHeader("Authorization")
+	if strings.HasPrefix(auth, "Bearer ") {
+		return strings.TrimPrefix(auth, "Bearer ")
+	}
+	return ""
+}
+
 // MiddlewareAuth 要求登录(用于 Web UI 控制台)
 func MiddlewareAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		token := extractToken(c)
+		token := extractTokenHeaderOnly(c)
 		if token == "" {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"success": false, "message": "未登录"})
 			return
@@ -109,8 +121,9 @@ func MiddlewareAdmin() gin.HandlerFunc {
 }
 
 // MiddlewareProxyAuth 代理接口鉴权
-// 优先使用 Web UI 的 JWT(管理员/用户), 其次校验 FCI_PROXY_KEY(OpenAI 兼容客户端场景)
-// 若 FCI_PROXY_KEY 未配置, 则允许携带有效 JWT 的已登录用户访问
+// 安全策略:
+//  1. 若配置了 FCI_PROXY_KEY: 客户端用该 key(Header 或 query, 后者用于 SSE)访问, 或用有效 JWT
+//  2. 若未配置 FCI_PROXY_KEY: 仅允许管理员 JWT 访问(避免任意登录态用户白嫖管理员上游额度)
 func MiddlewareProxyAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		token := extractToken(c)
@@ -125,11 +138,10 @@ func MiddlewareProxyAuth() gin.HandlerFunc {
 				return
 			}
 		}
-		// 2. 校验代理访问密钥
+		// 2. 校验代理访问密钥(常量时间比较, 防时序侧信道)
 		proxyKey := os.Getenv("FCI_PROXY_KEY")
 		if proxyKey != "" {
-			// 客户端通过 Authorization: Bearer <proxyKey> 或 query ?token=<proxyKey> 传入
-			if token == proxyKey {
+			if token != "" && subtle.ConstantTimeCompare([]byte(token), []byte(proxyKey)) == 1 {
 				c.Set(ContextKeyAdmin, false)
 				c.Next()
 				return
@@ -139,9 +151,10 @@ func MiddlewareProxyAuth() gin.HandlerFunc {
 			})
 			return
 		}
-		// 3. 未配置代理密钥且无有效 JWT: 拒绝(防止匿名调用)
+		// 3. 未配置代理密钥: 拒绝(此时 JWT 路径已在第 1 步处理, 走到这里说明无有效 JWT)
+		//    不再允许"任意有效 JWT 即放行", 收紧到必须配置 FCI_PROXY_KEY 或管理员 JWT
 		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-			"error": gin.H{"message": "authentication required (configure FCI_PROXY_KEY or login via Web UI)", "type": "auth_error", "code": 401},
+			"error": gin.H{"message": "authentication required (configure FCI_PROXY_KEY or login as admin via Web UI)", "type": "auth_error", "code": 401},
 		})
 	}
 }

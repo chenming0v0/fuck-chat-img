@@ -10,6 +10,7 @@ import (
 	"github.com/fuck-chat-img/fci/internal/cache"
 	"github.com/fuck-chat-img/fci/internal/model"
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 // ListHistory 历史记录列表(管理员看全部, 普通用户只看自己的)
@@ -106,53 +107,59 @@ func ClearHistory(c *gin.Context) {
 }
 
 // HistoryStats 历史统计(管理员看全部, 普通用户只看自己的)
+//
+// 实现: 每个独立统计都基于 model.DB.Session(&gorm.Session{}) 起一个干净的查询,
+// 避免复用同一 *gorm.DB 链导致的 Where/Select 残留污染(GORM v2 经典 footgun,
+// 连续 Count/Scan 复用同一链时 SELECT 子句会相互干扰, 导致统计错误).
 func HistoryStats(c *gin.Context) {
 	var total, successCount, failCount, cacheHitCount int64
 	now := time.Now()
 	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 
-	q := model.DB.Model(&model.History{})
-	// 用户隔离
-	if isAdmin, _ := c.Get(auth.ContextKeyAdmin); isAdmin != true {
-		uid, _ := c.Get(auth.ContextKeyUserID)
-		if userID, ok := uid.(uint); ok {
-			q = q.Where("user_id = ?", userID)
-		} else {
-			q = q.Where("user_id = ?", 0)
+	// baseScope: 仅返回带用户隔离 Where 的查询构造器, 不携带任何 SELECT/额外条件
+	baseScope := func() *gorm.DB {
+		q := model.DB.Session(&gorm.Session{}).Model(&model.History{})
+		if isAdmin, _ := c.Get(auth.ContextKeyAdmin); isAdmin != true {
+			uid, _ := c.Get(auth.ContextKeyUserID)
+			if userID, ok := uid.(uint); ok {
+				return q.Where("user_id = ?", userID)
+			}
+			return q.Where("user_id = ?", 0)
 		}
+		return q
 	}
 
-	q.Count(&total)
-	q.Where("success = ?", true).Count(&successCount)
-	q.Where("success = ?", false).Count(&failCount)
-	q.Where("cache_hit = ?", true).Count(&cacheHitCount)
+	baseScope().Count(&total)
+	baseScope().Where("success = ?", true).Count(&successCount)
+	baseScope().Where("success = ?", false).Count(&failCount)
+	baseScope().Where("cache_hit = ?", true).Count(&cacheHitCount)
 
 	var todayCount int64
-	q.Where("created_at >= ?", today).Count(&todayCount)
+	baseScope().Where("created_at >= ?", today).Count(&todayCount)
 
 	var avgLatency float64
 	type avgRes struct{ Avg float64 }
 	var ar avgRes
-	q.Select("COALESCE(AVG(latency_ms),0) as avg").Scan(&ar)
+	baseScope().Select("COALESCE(AVG(latency_ms),0) as avg").Scan(&ar)
 	avgLatency = ar.Avg
 
 	var totalTokens int64
 	type tokRes struct{ Sum int64 }
 	var tr tokRes
-	q.Select("COALESCE(SUM(total_tokens),0) as sum").Scan(&tr)
+	baseScope().Select("COALESCE(SUM(total_tokens),0) as sum").Scan(&tr)
 	totalTokens = tr.Sum
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"data": gin.H{
-			"total":         total,
-			"success":       successCount,
-			"fail":          failCount,
-			"cache_hit":     cacheHitCount,
-			"today":         todayCount,
-			"avg_latency":   avgLatency,
-			"total_tokens":  totalTokens,
-			"cache_stats":   cache.GetStats(),
+			"total":        total,
+			"success":      successCount,
+			"fail":         failCount,
+			"cache_hit":    cacheHitCount,
+			"today":        todayCount,
+			"avg_latency":  avgLatency,
+			"total_tokens": totalTokens,
+			"cache_stats":  cache.GetStats(),
 		},
 	})
 }

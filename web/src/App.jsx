@@ -1,5 +1,5 @@
 import React from 'react'
-import { Routes, Route, Navigate } from 'react-router-dom'
+import { Routes, Route, Navigate, Link } from 'react-router-dom'
 import { AuthProvider, ProtectedRoute, AdminRoute } from '@/helpers/auth'
 import { ThemeProvider } from '@/context/Theme'
 import PageLayout from '@/components/layout/PageLayout'
@@ -19,8 +19,9 @@ function NotFound() {
       <div className="text-sm text-semi-color-text-2">
         页面不存在
       </div>
-      <a
-        href="/console"
+      {/* SPA 内部用 Link 走客户端路由, 避免整页刷新丢状态 */}
+      <Link
+        to="/console"
         className="mt-2 text-sm !rounded-full px-4 py-2"
         style={{
           background: 'var(--semi-color-primary)',
@@ -28,7 +29,7 @@ function NotFound() {
         }}
       >
         返回控制台
-      </a>
+      </Link>
     </div>
   )
 }

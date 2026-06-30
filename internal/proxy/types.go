@@ -7,27 +7,48 @@ import (
 	"sync"
 	"time"
 
+	"github.com/fuck-chat-img/fci/internal/auth"
 	"github.com/fuck-chat-img/fci/internal/config"
+	"github.com/gin-gonic/gin"
 )
 
 // sharedHTTPClient 全局复用的 HTTP 客户端(连接池复用, 避免每次请求新建)
-var sharedHTTPClient = &http.Client{
-	Timeout: time.Duration(config.Get().RequestTimeout) * time.Second,
-	Transport: &http.Transport{
-		MaxIdleConns:        100,
-		MaxIdleConnsPerHost: 20,
-		IdleConnTimeout:     90 * time.Second,
-	},
+// 注意: 包初始化时捕获 config.Get().RequestTimeout; 测试若改动超时需调用 resetHTTPClients.
+var sharedHTTPClient = newHTTPClient(config.Get().RequestTimeout, false)
+
+// sharedStreamHTTPClient 流式请求专用(更长超时, 避免长 SSE 流被切断)
+var sharedStreamHTTPClient = newHTTPClient(config.Get().RequestTimeout*2, true)
+
+func newHTTPClient(timeoutSec int, stream bool) *http.Client {
+	return &http.Client{
+		Timeout: time.Duration(timeoutSec) * time.Second,
+		Transport: &http.Transport{
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 20,
+			IdleConnTimeout:     90 * time.Second,
+		},
+	}
 }
 
-// sharedStreamHTTPClient 流式请求专用(更长超时)
-var sharedStreamHTTPClient = &http.Client{
-	Timeout: time.Duration(config.Get().RequestTimeout*2) * time.Second,
-	Transport: &http.Transport{
-		MaxIdleConns:        100,
-		MaxIdleConnsPerHost: 20,
-		IdleConnTimeout:     90 * time.Second,
-	},
+// resetHTTPClients 按当前配置重建全局 HTTP 客户端(主要供测试使用, 让 RequestTimeout 改动生效)
+func resetHTTPClients() {
+	cfg := config.Get()
+	sharedHTTPClient.CloseIdleConnections()
+	sharedStreamHTTPClient.CloseIdleConnections()
+	sharedHTTPClient = newHTTPClient(cfg.RequestTimeout, false)
+	sharedStreamHTTPClient = newHTTPClient(cfg.RequestTimeout*2, true)
+}
+
+// extractUserID 从 gin.Context 提取用户ID(由 MiddlewareProxyAuth/MiddlewareAuth 写入)
+// 用于把代理请求历史归属到具体用户, 实现 History 的用户隔离.
+// FCI_PROXY_KEY 匿名访问场景下返回 0.
+func extractUserID(c *gin.Context) uint {
+	if v, exists := c.Get(auth.ContextKeyUserID); exists {
+		if uid, ok := v.(uint); ok {
+			return uid
+		}
+	}
+	return 0
 }
 
 // UpstreamModelRT 运行时上游模型配置(来自 ModelGroup 的 JSON 字段反序列化)

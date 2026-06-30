@@ -13,8 +13,9 @@ import {
   Store,
 } from 'lucide-react'
 import CardPro from '@/components/common/ui/CardPro'
-import { historyStats } from '@/helpers/api'
+import { historyStats, pickMessage } from '@/helpers/api'
 import { useAuth } from '@/helpers/auth'
+import { toast } from 'react-toastify'
 
 // 仪表盘：展示历史统计与模型组广场入口
 export default function Dashboard() {
@@ -32,7 +33,7 @@ export default function Dashboard() {
           setStats(res.data)
         }
       } catch (e) {
-        // 静默失败
+        if (active) toast.error(pickMessage(e, '加载统计数据失败'))
       } finally {
         if (active) setLoading(false)
       }

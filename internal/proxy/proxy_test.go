@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -54,11 +55,30 @@ func setupTestEnv(t *testing.T) (*gin.Engine, *int, *int, *[]byte) {
 	}))
 
 	// 模拟主对话模型: 记录收到的 input, 返回 responses 格式
+	// 流式请求(Accept: text/event-stream)返回 SSE, 非流式返回 JSON
 	mainCalls := 0
 	lastInput := []byte{}
 	mainSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mainCalls++
 		lastInput, _ = io.ReadAll(r.Body)
+		if r.Header.Get("Accept") == "text/event-stream" {
+			// 真流式 SSE: 逐事件写出
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, "data: {\"type\":\"message_start\",\"usage\":{\"input_tokens\":10}}\n\n")
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			fmt.Fprintf(w, "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":5}}\n\n")
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			fmt.Fprintf(w, "data: [DONE]\n\n")
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"id":"resp_test","object":"response","model":"gpt-4o","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"这是一只猫"}]}],"usage":{"input_tokens":10,"output_tokens":5}}`))
 	}))
@@ -81,7 +101,10 @@ func setupTestEnv(t *testing.T) (*gin.Engine, *int, *int, *[]byte) {
 
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
+	// 注册三协议路由, 便于各协议测试复用同一环境
 	r.POST("/v1/responses", HandleResponses)
+	r.POST("/v1/messages", HandleMessages)
+	r.POST("/v1/chat/completions", HandleChat)
 	r.GET("/v1/models", HandleModels)
 
 	t.Cleanup(func() {
@@ -195,7 +218,7 @@ func TestResponsesImageMixingAndCache(t *testing.T) {
 }
 
 func TestImageRecognitionFailureReturnsError(t *testing.T) {
-	r, imgCalls, mainCalls, _ := setupTestEnv(t)
+	r, _, mainCalls, _ := setupTestEnv(t)
 
 	// 让图片模型返回错误: 直接通过 DB 改成指向一个会 500 的上游
 	errSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -216,7 +239,6 @@ func TestImageRecognitionFailureReturnsError(t *testing.T) {
 	if *mainCalls != 0 {
 		t.Errorf("图片失败时不应调用主模型, 实际 %d", *mainCalls)
 	}
-	_ = imgCalls
 	if !bytes.Contains(w.Body.Bytes(), []byte("图片识别失败")) {
 		t.Errorf("错误信息应包含'图片识别失败', body=%s", w.Body.String())
 	}
@@ -272,6 +294,24 @@ func setupMessagesTestEnv(t *testing.T) (*gin.Engine, *int, *int) {
 		// 上游应当透传 anthropic-version 头
 		if v := r.Header.Get("anthropic-version"); v == "" {
 			t.Errorf("上游应透传 anthropic-version 头")
+		}
+		// 流式请求返回 SSE, 非流式返回 JSON
+		if r.Header.Get("Accept") == "text/event-stream" {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, "data: {\"type\":\"message_start\",\"usage\":{\"input_tokens\":10}}\n\n")
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			fmt.Fprintf(w, "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":5}}\n\n")
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			fmt.Fprintf(w, "data: [DONE]\n\n")
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"id":"msg_test","type":"message","role":"assistant","content":[{"type":"text","text":"这是一只猫"}],"usage":{"input_tokens":10,"output_tokens":5}}`))
@@ -405,5 +445,135 @@ func TestMessagesCodexToolForm(t *testing.T) {
 	}
 	if *mainCalls != 1 {
 		t.Errorf("上游应被调用1次, 实际 %d", *mainCalls)
+	}
+}
+
+// TestMessagesStreamVsNonStreamCacheIsolation 回归: 流式与非流式必须使用不同缓存键.
+// 历史缺陷: cacheKey 未纳入 stream, 导致先非流式后流式(同 messages)命中同一缓存,
+// 流式客户端拿到一个 JSON blob 而非 SSE, 解析失败.
+func TestMessagesStreamVsNonStreamCacheIsolation(t *testing.T) {
+	r, _, mainCalls := setupMessagesTestEnv(t)
+
+	body := `{"model":"claude-vision","messages":[{"role":"user","content":"hi"}],"max_tokens":100,"stream":false}`
+
+	// 1. 非流式请求 -> 上游调用 1 次, 响应应是 JSON
+	req1 := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(body))
+	req1.Header.Set("anthropic-version", "2023-06-01")
+	w1 := httptest.NewRecorder()
+	r.ServeHTTP(w1, req1)
+	if w1.Code != http.StatusOK {
+		t.Fatalf("非流式请求失败 status=%d body=%s", w1.Code, w1.Body.String())
+	}
+	if ct := w1.Header().Get("Content-Type"); !strings.Contains(ct, "application/json") {
+		t.Errorf("非流式响应 Content-Type 应为 application/json, 实际 %s", ct)
+	}
+	if *mainCalls != 1 {
+		t.Fatalf("非流式应调用上游1次, 实际 %d", *mainCalls)
+	}
+
+	// 2. 同 messages 但 stream=true -> 必须不命中缓存, 上游再调用1次, 响应应是 SSE
+	bodyStream := `{"model":"claude-vision","messages":[{"role":"user","content":"hi"}],"max_tokens":100,"stream":true}`
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(bodyStream))
+	req2.Header.Set("anthropic-version", "2023-06-01")
+	w2 := httptest.NewRecorder()
+	r.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("流式请求失败 status=%d body=%s", w2.Code, w2.Body.String())
+	}
+	if *mainCalls != 2 {
+		t.Errorf("流式不应命中非流式缓存, 上游应被调用第2次, 实际 %d", *mainCalls)
+	}
+	if ct := w2.Header().Get("Content-Type"); !strings.Contains(ct, "text/event-stream") {
+		t.Errorf("流式响应 Content-Type 应为 text/event-stream, 实际 %s", ct)
+	}
+	if !bytes.Contains(w2.Body.Bytes(), []byte("data:")) {
+		t.Errorf("流式响应体应包含 SSE data: 行, body=%s", w2.Body.String())
+	}
+
+	// 3. 再来一次同 stream=true -> 这次应命中流式缓存, 上游不再调用
+	req3 := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(bodyStream))
+	req3.Header.Set("anthropic-version", "2023-06-01")
+	w3 := httptest.NewRecorder()
+	r.ServeHTTP(w3, req3)
+	if w3.Code != http.StatusOK {
+		t.Fatalf("流式缓存命中请求失败 status=%d", w3.Code)
+	}
+	if *mainCalls != 2 {
+		t.Errorf("流式缓存命中后上游不应再调用, 实际 %d", *mainCalls)
+	}
+	if ct := w3.Header().Get("Content-Type"); !strings.Contains(ct, "text/event-stream") {
+		t.Errorf("流式缓存回放 Content-Type 应仍为 text/event-stream, 实际 %s", ct)
+	}
+}
+
+// TestMessagesMaxTokensCacheIsolation 回归: 不同 max_tokens 必须不命中同一缓存.
+// 历史缺陷: cacheKey 仅规范化 messages, 遗漏 max_tokens, 导致 max_tokens=100 与 =4096
+// 命中同一条缓存返回截断内容(Claude max_tokens 必填, 碰撞概率高).
+func TestMessagesMaxTokensCacheIsolation(t *testing.T) {
+	r, _, mainCalls := setupMessagesTestEnv(t)
+
+	// 1. max_tokens=100
+	b1 := `{"model":"claude-vision","messages":[{"role":"user","content":"写一首诗"}],"max_tokens":100,"stream":false}`
+	req1 := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(b1))
+	req1.Header.Set("anthropic-version", "2023-06-01")
+	w1 := httptest.NewRecorder()
+	r.ServeHTTP(w1, req1)
+	if w1.Code != http.StatusOK {
+		t.Fatalf("请求1失败 status=%d", w1.Code)
+	}
+	if *mainCalls != 1 {
+		t.Fatalf("请求1应调用上游1次, 实际 %d", *mainCalls)
+	}
+
+	// 2. 同 messages 但 max_tokens=4096 -> 不应命中缓存
+	b2 := `{"model":"claude-vision","messages":[{"role":"user","content":"写一首诗"}],"max_tokens":4096,"stream":false}`
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(b2))
+	req2.Header.Set("anthropic-version", "2023-06-01")
+	w2 := httptest.NewRecorder()
+	r.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("请求2失败 status=%d", w2.Code)
+	}
+	if *mainCalls != 2 {
+		t.Errorf("不同 max_tokens 不应命中同一缓存, 上游应调用第2次, 实际 %d", *mainCalls)
+	}
+
+	// 3. 再发 max_tokens=100 -> 命中缓存, 上游不再调用
+	req3 := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(b1))
+	req3.Header.Set("anthropic-version", "2023-06-01")
+	w3 := httptest.NewRecorder()
+	r.ServeHTTP(w3, req3)
+	if *mainCalls != 2 {
+		t.Errorf("相同 max_tokens 应命中缓存, 上游不应再调用, 实际 %d", *mainCalls)
+	}
+}
+
+// TestMessagesAnthropicErrorFormat 回归: MES 错误响应必须是 Anthropic 格式,
+// 不能用 OpenAI 的 {"error":{"message":...}}. Claude SDK 依赖 {"type":"error","error":{...}}.
+func TestMessagesAnthropicErrorFormat(t *testing.T) {
+	r, _, _ := setupMessagesTestEnv(t)
+
+	// 不存在的模型组 -> 应返回 Anthropic 格式错误
+	bad := `{"model":"not-exist","messages":[{"role":"user","content":"hi"}],"max_tokens":100}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(bad))
+	req.Header.Set("anthropic-version", "2023-06-01")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code == http.StatusOK {
+		t.Fatalf("不存在的模型组应返回非200")
+	}
+	var obj map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &obj); err != nil {
+		t.Fatalf("错误响应不是合法 JSON: %v, body=%s", err, w.Body.String())
+	}
+	if obj["type"] != "error" {
+		t.Errorf("Anthropic 错误响应顶层 type 应为 'error', 实际 %v, body=%s", obj["type"], w.Body.String())
+	}
+	errObj, ok := obj["error"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Anthropic 错误响应应含 error 对象, body=%s", w.Body.String())
+	}
+	if _, ok := errObj["message"].(string); !ok {
+		t.Errorf("error.message 应为字符串, body=%s", w.Body.String())
 	}
 }

@@ -20,6 +20,7 @@ import {
   deleteHistory,
   clearHistory,
   historyStats,
+  pickMessage,
 } from '@/helpers/api'
 import { useAuth } from '@/helpers/auth'
 import { toast } from 'react-toastify'
@@ -32,6 +33,8 @@ export default function History() {
   const [loading, setLoading] = useState(true)
   const [page, setPage] = useState(1)
   const [size, setSize] = useState(10)
+  // 搜索防抖: keywordInput 即时, keyword 防抖后用于请求, 防每键一请求与过期响应覆盖
+  const [keywordInput, setKeywordInput] = useState('')
   const [keyword, setKeyword] = useState('')
   const [group, setGroup] = useState(undefined)
   const [successFilter, setSuccessFilter] = useState(undefined)
@@ -66,7 +69,7 @@ export default function History() {
         setTotal(res.total || 0)
       }
     } catch (e) {
-      // 静默
+      toast.error(pickMessage(e, '加载历史记录失败'))
     } finally {
       setLoading(false)
     }
@@ -77,9 +80,18 @@ export default function History() {
       const res = await historyStats()
       if (res?.success) setStats(res.data)
     } catch (e) {
-      // 静默
+      // 统计失败不阻断主列表
     }
   }
+
+  // keyword 防抖
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setKeyword(keywordInput)
+      setPage(1)
+    }, 300)
+    return () => clearTimeout(t)
+  }, [keywordInput])
 
   useEffect(() => {
     refresh()
@@ -124,7 +136,7 @@ export default function History() {
             toast.error(res?.message || '删除失败')
           }
         } catch (e) {
-          toast.error(e?.response?.data?.message || '删除失败')
+          toast.error(pickMessage(e, '删除失败'))
         }
       },
     })
@@ -146,7 +158,7 @@ export default function History() {
             toast.error(res?.message || '清空失败')
           }
         } catch (e) {
-          toast.error(e?.response?.data?.message || '清空失败')
+          toast.error(pickMessage(e, '清空失败'))
         }
       },
     })
@@ -306,10 +318,9 @@ export default function History() {
               minWidth: 200,
             }}
             placeholder="搜索请求 ID / 模型组"
-            value={keyword}
+            value={keywordInput}
             onChange={(e) => {
-              setKeyword(e.target.value)
-              setPage(1)
+              setKeywordInput(e.target.value)
             }}
           />
         }

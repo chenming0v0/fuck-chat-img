@@ -1,20 +1,9 @@
-# 二进制与数据
 /bin/
-/fci
 /data/
+/web/node_modules/
+/web/dist/
 *.db
 *.db-journal
-*.exe
-
-# 前端
-web/node_modules/
-web/dist/
-
-# IDE
-.vscode/
-.idea/
-*.swp
-
-# 临时
+.env
+!.env.example
 *.log
-.DS_Store

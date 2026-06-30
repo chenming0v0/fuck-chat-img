@@ -164,7 +164,8 @@ func recognizeImage(imgModels []UpstreamModelRT, strategy string, prompt string,
 			return desc, m.DisplayName(), nil
 		}
 		lastErr = fmt.Errorf("[%s] %v", m.DisplayName(), err)
-		// round_robin 与 failover 在此表现一致: 逐个尝试直到成功
+		// round_robin 与 failover 的差异已在 nextImageModels(起点不同)体现,
+		// 此处统一逐个尝试直到成功; strategy 参数保留以备未来扩展.
 		_ = strategy
 	}
 	if lastErr == nil {

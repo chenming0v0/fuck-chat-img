@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from 'react'
 import { Tag, Spin, Empty, Typography } from '@douyinfe/semi-ui'
 import { Boxes } from 'lucide-react'
+import { toast } from 'react-toastify'
 import CardPro from '@/components/common/ui/CardPro'
-import { listGroups } from '@/helpers/api'
+import { listGroups, pickMessage } from '@/helpers/api'
 
 // 模型广场：卡片视图展示已启用模型组，提示对外暴露的模型名
 export default function ModelPlaza() {
@@ -19,7 +20,7 @@ export default function ModelPlaza() {
           setGroups((res.data || []).filter((g) => g.enabled))
         }
       } catch (e) {
-        // 静默
+        if (active) toast.error(pickMessage(e, '加载模型列表失败'))
       } finally {
         if (active) setLoading(false)
       }
@@ -34,7 +35,11 @@ export default function ModelPlaza() {
       <div>
         <h2 className="text-2xl font-semibold tracking-tight">模型广场</h2>
         <p className="text-sm text-semi-color-text-2 mt-1">
-          以下模型组当前已启用。调用 <code className="px-1.5 py-0.5 rounded bg-semi-color-fill-1">/v1/responses</code> 接口时，请将 <code className="px-1.5 py-0.5 rounded bg-semi-color-fill-1">model</code> 字段填写为模型组名称。
+          以下模型组当前已启用。本服务同时兼容三种协议：
+          <code className="px-1.5 py-0.5 rounded bg-semi-color-fill-1">/v1/responses</code>、
+          <code className="px-1.5 py-0.5 rounded bg-semi-color-fill-1">/v1/chat/completions</code>、
+          <code className="px-1.5 py-0.5 rounded bg-semi-color-fill-1">/v1/messages</code>（Anthropic Claude 兼容），
+          三者均支持真流式 SSE。调用时请将 <code className="px-1.5 py-0.5 rounded bg-semi-color-fill-1">model</code> 字段填写为模型组名称。
         </p>
       </div>
 

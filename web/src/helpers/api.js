@@ -19,7 +19,7 @@ instance.interceptors.request.use(
   (error) => Promise.reject(error),
 )
 
-// 响应拦截器：401 时清空 token 并跳转登录页
+// 响应拦截器：401 时清空登录态(含 role, 避免刷新后残留 admin 误判)并跳转登录页
 instance.interceptors.response.use(
   (response) => response.data,
   (error) => {
@@ -27,8 +27,9 @@ instance.interceptors.response.use(
     if (status === 401) {
       localStorage.removeItem('fci_token')
       localStorage.removeItem('fci_username')
+      localStorage.removeItem('fci_role')
       // 仅在浏览器环境跳转，避免刷新覆盖
-      if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
+      if (typeof window !== 'undefined' && window.location.pathname !== '/login' && window.location.pathname !== '/setup') {
         window.location.href = '/login'
       }
     }

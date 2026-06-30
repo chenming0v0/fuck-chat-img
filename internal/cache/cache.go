@@ -19,6 +19,10 @@ type Entry struct {
 	ModelName string
 	CreatedAt time.Time
 	HitCount  int64
+	// 写入缓存时记录的请求元数据, 命中回放时用于回填历史记录, 避免硬编码失真
+	HasImage      bool
+	ImageCount    int
+	ImageModelUsed string
 }
 
 // Store 内存 LRU 缓存
@@ -87,6 +91,56 @@ func (s *Store) touchLocked(key string) {
 
 // Put 写入缓存(非流式)
 func Put(key, modelName string, value []byte) {
+	putEntry(key, &Entry{
+		Key:       key,
+		Value:     value,
+		IsStream:  false,
+		ModelName: modelName,
+		CreatedAt: time.Now(),
+	})
+}
+
+// PutWithMeta 写入缓存(非流式, 携带请求元数据用于命中回放时的历史回填)
+func PutWithMeta(key, modelName string, value []byte, hasImage bool, imgCount int, imgModelUsed string) {
+	putEntry(key, &Entry{
+		Key:            key,
+		Value:          value,
+		IsStream:       false,
+		ModelName:      modelName,
+		CreatedAt:      time.Now(),
+		HasImage:       hasImage,
+		ImageCount:     imgCount,
+		ImageModelUsed: imgModelUsed,
+	})
+}
+
+// PutStream 写入缓存(流式, 存事件列表用于回放)
+func PutStream(key, modelName string, events [][]byte) {
+	putEntry(key, &Entry{
+		Key:          key,
+		StreamEvents: events,
+		IsStream:     true,
+		ModelName:    modelName,
+		CreatedAt:    time.Now(),
+	})
+}
+
+// PutStreamWithMeta 写入缓存(流式, 携带请求元数据)
+func PutStreamWithMeta(key, modelName string, events [][]byte, hasImage bool, imgCount int, imgModelUsed string) {
+	putEntry(key, &Entry{
+		Key:            key,
+		StreamEvents:   events,
+		IsStream:       true,
+		ModelName:      modelName,
+		CreatedAt:      time.Now(),
+		HasImage:       hasImage,
+		ImageCount:     imgCount,
+		ImageModelUsed: imgModelUsed,
+	})
+}
+
+// putEntry 实际写入逻辑(统一处理 LRU 顺序与淘汰)
+func putEntry(key string, e *Entry) {
 	if store == nil || !store.enabled {
 		return
 	}
@@ -99,35 +153,7 @@ func Put(key, modelName string, value []byte) {
 		// 已存在: 移到末尾(LRU)
 		store.touchLocked(key)
 	}
-	store.items[key] = &Entry{
-		Key:       key,
-		Value:     value,
-		IsStream:  false,
-		ModelName: modelName,
-		CreatedAt: time.Now(),
-	}
-}
-
-// PutStream 写入缓存(流式, 存事件列表用于回放)
-func PutStream(key, modelName string, events [][]byte) {
-	if store == nil || !store.enabled {
-		return
-	}
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	if _, exists := store.items[key]; !exists {
-		store.order = append(store.order, key)
-		store.evictLocked()
-	} else {
-		store.touchLocked(key)
-	}
-	store.items[key] = &Entry{
-		Key:          key,
-		StreamEvents: events,
-		IsStream:     true,
-		ModelName:    modelName,
-		CreatedAt:    time.Now(),
-	}
+	store.items[key] = e
 }
 
 // evictLocked 淘汰超出上限的条目(FIFO, 调用方持锁)

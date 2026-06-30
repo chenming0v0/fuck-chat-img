@@ -1,0 +1,27 @@
+# 构建上下文排除清单(避免泄露敏感文件 / 减小镜像体积 / 加速构建)
+# 注意: web/dist 在多阶段构建里由 web-builder 生成, 不从宿主拷贝
+
+.git
+.gitignore
+.github
+data
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+.env
+.env.*
+!.env.example
+bin
+web/node_modules
+web/dist
+review.md
+AGENTS.md
+*.md
+!web/README.md
+Dockerfile
+.dockerignore
+.docker
+.vscode
+.idea
+*.log
