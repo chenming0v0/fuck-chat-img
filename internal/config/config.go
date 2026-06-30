@@ -10,12 +10,11 @@ import (
 type Config struct {
 	ListenAddr     string
 	DBPath         string
-	WebDir         string // 前端静态资源目录
+	WebDir         string // 前端静态资源目录; 留空使用嵌入前端
 	JWTSecret      string
 	AdminUser      string
 	AdminPass      string // bcrypt 哈希后的密码，若为空则在首次启动时使用 InitAdminPass 并写入
 	InitAdminPass  string
-	SessionSecret  string
 	CacheEnabled   bool
 	CacheMaxItems  int
 	RequestTimeout int // 上游请求超时(秒)
@@ -24,10 +23,9 @@ type Config struct {
 var cfg = Config{
 	ListenAddr:     ":8080",
 	DBPath:         "./data/fci.db",
-	WebDir:         "./web/dist",
+	WebDir:         "", // 默认空: 使用嵌入前端; 开发时通过环境变量指向 web/dist
 	JWTSecret:      "fuck-chat-img-default-secret-change-me",
 	AdminUser:      "root",
-	SessionSecret:  "fuck-chat-img-session-secret",
 	CacheEnabled:   true,
 	CacheMaxItems:  10000,
 	RequestTimeout: 300,
@@ -49,9 +47,6 @@ func Load() {
 	}
 	if v := os.Getenv("FCI_JWT_SECRET"); v != "" {
 		cfg.JWTSecret = v
-	}
-	if v := os.Getenv("FCI_SESSION_SECRET"); v != "" {
-		cfg.SessionSecret = v
 	}
 	if v := os.Getenv("FCI_ADMIN_USER"); v != "" {
 		cfg.AdminUser = v

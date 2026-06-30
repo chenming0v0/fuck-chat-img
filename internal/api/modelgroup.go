@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/fuck-chat-img/fci/internal/model"
+	"github.com/fuck-chat-img/fci/internal/proxy"
 	"github.com/gin-gonic/gin"
 )
 
@@ -123,10 +124,17 @@ func UpdateGroup(c *gin.Context) {
 // DeleteGroup 删除
 func DeleteGroup(c *gin.Context) {
 	id, _ := strconv.Atoi(c.Param("id"))
+	// 先取出名字, 用于清理轮询游标
+	var g model.ModelGroup
+	if err := model.DB.First(&g, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"success": false, "message": "模型组不存在"})
+		return
+	}
 	if err := model.DB.Delete(&model.ModelGroup{}, id).Error; err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
 		return
 	}
+	proxy.ForgetGroupRR(g.Name)
 	c.JSON(http.StatusOK, gin.H{"success": true, "message": "已删除"})
 }
 
@@ -172,6 +180,9 @@ func validateGroupReq(r *createGroupReq) error {
 	}
 	if r.MainTextModel.BaseURL == "" || r.MainTextModel.APIKey == "" || r.MainTextModel.Model == "" {
 		return errStr("主对话模型需填写 base_url/api_key/model")
+	}
+	if len(r.ImageModels) == 0 {
+		return errStr("至少需要 1 个图片模型")
 	}
 	if r.ImageStrategy == "" {
 		r.ImageStrategy = "round_robin"

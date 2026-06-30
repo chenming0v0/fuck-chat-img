@@ -95,17 +95,29 @@ var (
 )
 
 // nextImageModels 按轮询策略返回尝试顺序
+//   - round_robin: 每次请求只挑 1 个模型(按顺序轮转), 失败即报错, 不再尝试下一个
+//   - failover:    返回全部模型(原顺序), 逐个尝试直到成功
 func nextImageModels(g *modelGroupRuntime) []UpstreamModelRT {
 	if len(g.ImageModels) == 0 {
 		return nil
 	}
+	if g.ImageStrategy == "failover" {
+		// 故障转移: 原顺序返回全部, 由调用方逐个尝试
+		out := make([]UpstreamModelRT, len(g.ImageModels))
+		copy(out, g.ImageModels)
+		return out
+	}
+	// round_robin: 只挑 1 个, 轮转
 	rrMu.Lock()
 	start := rrIndex[g.Name] % len(g.ImageModels)
 	rrIndex[g.Name] = (start + 1) % len(g.ImageModels)
 	rrMu.Unlock()
-	out := make([]UpstreamModelRT, 0, len(g.ImageModels))
-	for i := 0; i < len(g.ImageModels); i++ {
-		out = append(out, g.ImageModels[(start+i)%len(g.ImageModels)])
-	}
-	return out
+	return []UpstreamModelRT{g.ImageModels[start]}
+}
+
+// ForgetGroupRR 删除模型组时清理其轮询游标, 避免内存泄漏
+func ForgetGroupRR(name string) {
+	rrMu.Lock()
+	delete(rrIndex, name)
+	rrMu.Unlock()
 }

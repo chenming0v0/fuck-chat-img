@@ -67,30 +67,41 @@ func extractImageRef(c map[string]interface{}) (url string, b64 string, ok bool)
 	return "", "", false
 }
 
-// ImageModelsConfig 图片模型配置(运行时使用)
-type ImageModelsConfig struct {
-	Group     *modelGroupRuntime
-	Prompt    string
-	Strategy  string
-}
-
 // recognizeImage 用图片模型轮询识别单张图片, 返回文本描述
 // 若所有图片模型都失败则返回 error (满足"图片识别失败直接返回报错")
-func recognizeImage(imgModels []UpstreamModelRT, strategy string, prompt string, imageURL, imageB64 string, client *http.Client) (string, string, error) {
+// imgModels 已由 nextImageModels 按策略(round_robin/failover)选定.
+func recognizeImage(imgModels []UpstreamModelRT, prompt string, imageURL, imageB64 string, client *http.Client) (string, string, error) {
 	if len(imgModels) == 0 {
 		return "", "", errors.New("未配置图片模型")
 	}
 	var lastErr error
+	emptyCount := 0
 	for _, m := range imgModels {
-		desc, err := callImageModel(m, prompt, imageURL, imageB64, client)
-		if err == nil && strings.TrimSpace(desc) != "" {
-			return desc, m.DisplayName(), nil
+		// 单模型重试次数, 默认 1 次
+		retries := m.MaxRetries
+		if retries < 1 {
+			retries = 1
 		}
-		lastErr = fmt.Errorf("[%s] %v", m.DisplayName(), err)
-		// round_robin 与 failover 在此表现一致: 逐个尝试直到成功
-		_ = strategy
+		var desc string
+		var err error
+		for attempt := 0; attempt < retries; attempt++ {
+			desc, err = callImageModel(m, prompt, imageURL, imageB64, client)
+			if err == nil && strings.TrimSpace(desc) != "" {
+				return desc, m.DisplayName(), nil
+			}
+		}
+		if err == nil && strings.TrimSpace(desc) == "" {
+			// 调用成功但返回空内容
+			emptyCount++
+			lastErr = fmt.Errorf("[%s] 返回空内容", m.DisplayName())
+		} else if err != nil {
+			lastErr = fmt.Errorf("[%s] %v", m.DisplayName(), err)
+		}
 	}
 	if lastErr == nil {
+		lastErr = errors.New("所有图片模型均返回空结果")
+	} else if emptyCount == len(imgModels) {
+		// 所有模型都返回空内容
 		lastErr = errors.New("所有图片模型均返回空结果")
 	}
 	return "", "", fmt.Errorf("图片识别失败: %w", lastErr)

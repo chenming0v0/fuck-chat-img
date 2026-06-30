@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fuck-chat-img/fci/internal/config"
@@ -24,7 +25,7 @@ type Entry struct {
 type Store struct {
 	mu       sync.RWMutex
 	items    map[string]*Entry
-	order    []string // 简单 LRU 顺序
+	order    []string // LRU 顺序: 队首为最久未使用, 队尾为最近使用
 	maxItems int
 	enabled  bool
 }
@@ -56,21 +57,40 @@ func Key(modelGroup string, canonicalInput []byte) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// Get 读取缓存
+// Get 读取缓存, 同时更新 LRU 顺序
 func Get(key string) (*Entry, bool) {
 	if store == nil || !store.enabled {
 		return nil, false
 	}
-	store.mu.RLock()
+	store.mu.Lock()
+	defer store.mu.Unlock()
 	e, ok := store.items[key]
-	store.mu.RUnlock()
 	if !ok {
 		return nil, false
 	}
-	store.mu.Lock()
 	e.HitCount++
-	store.mu.Unlock()
+	store.touchLocked(key)
 	return e, true
+}
+
+// touchLocked 将 key 移动到 LRU 队尾(最近使用), 调用方持锁
+func (s *Store) touchLocked(key string) {
+	if len(s.order) <= 1 {
+		return
+	}
+	idx := -1
+	for i, k := range s.order {
+		if k == key {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 || idx == len(s.order)-1 {
+		return
+	}
+	// 移除并追加到队尾
+	s.order = append(s.order[:idx], s.order[idx+1:]...)
+	s.order = append(s.order, key)
 }
 
 // Put 写入缓存(非流式)
@@ -83,6 +103,9 @@ func Put(key, modelName string, value []byte) {
 	if _, exists := store.items[key]; !exists {
 		store.order = append(store.order, key)
 		store.evictLocked()
+	} else {
+		// 已存在: 移到队尾
+		store.touchLocked(key)
 	}
 	store.items[key] = &Entry{
 		Key:       key,
@@ -103,6 +126,8 @@ func PutStream(key, modelName string, events [][]byte) {
 	if _, exists := store.items[key]; !exists {
 		store.order = append(store.order, key)
 		store.evictLocked()
+	} else {
+		store.touchLocked(key)
 	}
 	store.items[key] = &Entry{
 		Key:          key,
@@ -113,7 +138,7 @@ func PutStream(key, modelName string, events [][]byte) {
 	}
 }
 
-// evictLocked 淘汰超出上限的条目(FIFO, 调用方持锁)
+// evictLocked 淘汰超出上限的条目(LRU, 调用方持锁)
 func (s *Store) evictLocked() {
 	for len(s.order) > s.maxItems && len(s.order) > 0 {
 		k := s.order[0]
@@ -136,11 +161,11 @@ var (
 	misses int64
 )
 
-// RecordHit 记录命中
-func RecordHit() { hits++ }
+// RecordHit 记录命中(原子操作)
+func RecordHit() { atomic.AddInt64(&hits, 1) }
 
-// RecordMiss 记录未命中
-func RecordMiss() { misses++ }
+// RecordMiss 记录未命中(原子操作)
+func RecordMiss() { atomic.AddInt64(&misses, 1) }
 
 // Stats 返回统计
 func GetStats() Stats {
@@ -153,8 +178,8 @@ func GetStats() Stats {
 		Enabled:  store.enabled,
 		Items:    len(store.items),
 		MaxItems: store.maxItems,
-		Hits:     hits,
-		Misses:   misses,
+		Hits:     atomic.LoadInt64(&hits),
+		Misses:   atomic.LoadInt64(&misses),
 	}
 }
 
