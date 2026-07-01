@@ -67,6 +67,7 @@ func SetupRouter() *gin.Engine {
 	api.GET("/status", Status)
 	api.POST("/login", rateLimit("login", 10, time.Minute), Login)
 	api.POST("/setup", rateLimit("setup", 10, time.Minute), Setup) // 首次设置管理员(仅在无任何用户时可用)
+	api.POST("/logout", Logout)                                    // 登出无需认证, 过期用户也可主动清Cookie
 
 	// ===== OpenAI 兼容代理接口 (使用模型组名作为访问凭证, /v1/models 需鉴权) =====
 	v1 := r.Group("/v1")
@@ -87,7 +88,6 @@ func SetupRouter() *gin.Engine {
 	{
 		authed.GET("/user", UserInfo)
 		authed.POST("/user/password", ChangePassword)
-		authed.POST("/logout", Logout)
 
 		// 模型组管理(普通用户只读, 管理员可写)
 		authed.GET("/groups", ListGroups)
@@ -123,6 +123,22 @@ func SetupRouter() *gin.Engine {
 // 用 atomic.Pointer 做整体替换, 避免运行期配置变更与请求处理路径的数据竞争.
 var sameOriginHosts atomic.Pointer[[]string]
 
+func hostsMatch(originHost, requestHost string) bool {
+	originHostname, _ := splitHostPort(originHost)
+	requestHostname, _ := splitHostPort(requestHost)
+	return originHostname == requestHostname
+}
+
+func splitHostPort(hostport string) (string, string) {
+	if hostport == "" {
+		return "", ""
+	}
+	if i := strings.LastIndex(hostport, ":"); i != -1 && !strings.Contains(hostport[i+1:], "]") {
+		return hostport[:i], hostport[i+1:]
+	}
+	return hostport, ""
+}
+
 // corsMiddleware 返回自定义 CORS 中间件, 能够访问请求 Host 头进行动态同源判断.
 // 这解决了 gin-contrib/cors 的 AllowOriginFunc 无法访问请求上下文的问题.
 func corsMiddleware() gin.HandlerFunc {
@@ -132,7 +148,7 @@ func corsMiddleware() gin.HandlerFunc {
 			c.Header("Vary", "Origin")
 			allow := false
 			if u, err := url.Parse(origin); err == nil {
-				if u.Host == c.Request.Host {
+				if hostsMatch(u.Host, c.Request.Host) {
 					allow = true
 				} else {
 					p := sameOriginHosts.Load()
@@ -169,7 +185,7 @@ func SetSameOriginHosts(hosts []string) {
 	sameOriginHosts.Store(&cp)
 }
 
-// rateLimit 简易每 IP 令牌桶速率限制中间件(无外部依赖).
+// rateLimit 简易每 IP 固定窗口速率限制中间件(无外部依赖).
 // limit 次 / window; 超限返回 429. 用于 /api/login /api/setup 防爆破与抢注轮询.
 func rateLimit(name string, limit int, window time.Duration) gin.HandlerFunc {
 	type bucket struct {

@@ -251,8 +251,14 @@ func validateUpstreamModel(m *model.UpstreamModel, label string) error {
 	if m.MaxRetries < 0 {
 		return errStr(label + " max_retries 不能小于 0")
 	}
-	if m.Weight <= 0 {
-		return errStr(label + " weight 必须大于 0")
+	if m.Weight == 0 {
+		m.Weight = 1
+	}
+	if m.Weight < 0 {
+		return errStr(label + " weight 不能为负数")
+	}
+	if m.MaxRetries == 0 {
+		m.MaxRetries = 1
 	}
 	return nil
 }

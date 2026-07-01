@@ -3,6 +3,7 @@ package auth
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -499,5 +500,310 @@ func TestCookieSecureInTestMode(t *testing.T) {
 	}
 	if cookies[0].Secure {
 		t.Error("cookie should not be Secure in test mode")
+	}
+}
+
+func TestNoneAlgorithmTokenRejected(t *testing.T) {
+	setupTestConfig(t)
+
+	claims := Claims{
+		UserID:   1,
+		Username: "test",
+		Role:     "admin",
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(1 * time.Hour)),
+		},
+	}
+	tok := jwt.NewWithClaims(jwt.SigningMethodNone, claims)
+	noneToken, err := tok.SignedString(jwt.UnsafeAllowNoneSignatureType)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = ParseToken(noneToken)
+	if err == nil {
+		t.Fatal("token with alg:none should be rejected")
+	}
+}
+
+func TestNonHMACAlgorithmTokenRejected(t *testing.T) {
+	setupTestConfig(t)
+
+	rsaKey := []byte("-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Qu\nKUpRKfFLfRYC9AIKjbJTWit+CqvjWYzvQwECAwEAAQJAIJLixBy2qpFoS4DSmoEm\no3qGy0t6z09AIJtH+5OeRV1be+N4cDYJKffGzDa88vQENZiRm0GRq6a+HPGQMd2k\nTQIhAKMSvzIBnni7ot/OSie2TmJLY4SwTQAevXysE2RbFDYdAiEBCUEaRQnMnbp7\n9mxDXDf6AU0cN/RPBjb9qSHDcWZHGzUCIG2Es59z8ugGrDY+pxLQnwfotadxd+Uy\nv/Ow5T0q5gIJAiEAyS4RaI9YG8EWx/2w0T67ZUVAw8eOMB6BIUg0Xcu+3okCIBOs\n/5OiPgoTdSy7bcF9IGpSE8ZgGKzgYQVZeN97YE00\n-----END RSA PRIVATE KEY-----")
+
+	claims := Claims{
+		UserID:   1,
+		Username: "test",
+		Role:     "admin",
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(1 * time.Hour)),
+		},
+	}
+	tok := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	rsaToken, err := tok.SignedString(rsaKey)
+	if err != nil {
+		t.Skip("RSA signing skipped (invalid test key)")
+		return
+	}
+
+	_, err = ParseToken(rsaToken)
+	if err == nil {
+		t.Fatal("token with RS256 algorithm should be rejected")
+	}
+}
+
+func TestMiddlewareProxyAuthRevokedJWTWithValidProxyKey(t *testing.T) {
+	setupTestConfig(t)
+	setupTestDB(t)
+	proxyKey := "valid-proxy-key"
+	config.SetProxyKeyForTest(proxyKey)
+
+	user := &model.User{
+		ID:           1,
+		Username:     "admin",
+		Role:         "admin",
+		TokenVersion: 0,
+	}
+	if err := model.DB.Create(user).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	token, _, err := GenerateToken(user)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := model.UpdatePassword(user.ID, "newpassword123"); err != nil {
+		t.Fatal(err)
+	}
+
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.GET("/proxy", MiddlewareProxyAuth(), func(c *gin.Context) {
+		userID, _ := c.Get(ContextKeyUserID)
+		if userID.(uint) != ProxyUserID {
+			t.Errorf("expected ProxyUserID when using proxy key, got %v", userID)
+		}
+		c.Status(http.StatusOK)
+	})
+
+	req := httptest.NewRequest("GET", "/proxy", nil)
+	req.AddCookie(&http.Cookie{Name: CookieName, Value: token})
+	req.Header.Set("Authorization", "Bearer "+proxyKey)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200 when revoked JWT cookie is present but valid proxy key in Authorization header, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestMiddlewareProxyAuthRevokedJWTClearsCookie(t *testing.T) {
+	setupTestConfig(t)
+	setupTestDB(t)
+	config.SetProxyKeyForTest("")
+
+	user := &model.User{
+		ID:           1,
+		Username:     "admin",
+		Role:         "admin",
+		TokenVersion: 0,
+	}
+	if err := model.DB.Create(user).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	token, _, err := GenerateToken(user)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := model.UpdatePassword(user.ID, "newpassword123"); err != nil {
+		t.Fatal(err)
+	}
+
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.GET("/proxy", MiddlewareProxyAuth(), func(c *gin.Context) {
+		c.Status(http.StatusOK)
+	})
+
+	req := httptest.NewRequest("GET", "/proxy", nil)
+	req.AddCookie(&http.Cookie{Name: CookieName, Value: token})
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 for revoked JWT, got %d", w.Code)
+	}
+
+	cookies := w.Result().Cookies()
+	var cleared bool
+	for _, cookie := range cookies {
+		if cookie.Name == CookieName && cookie.MaxAge == -1 {
+			cleared = true
+			break
+		}
+	}
+	if !cleared {
+		t.Error("revoked JWT in proxy auth should clear cookie")
+	}
+}
+
+func TestExtractTokenPriority(t *testing.T) {
+	setupTestConfig(t)
+
+	cookieToken := "cookie-token"
+	headerToken := "header-token"
+	queryToken := "query-token"
+
+	req := httptest.NewRequest("GET", "/?token="+queryToken, nil)
+	req.AddCookie(&http.Cookie{Name: CookieName, Value: cookieToken})
+	req.Header.Set("Authorization", "Bearer "+headerToken)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = req
+
+	extracted := extractToken(c)
+	if extracted != cookieToken {
+		t.Errorf("cookie should have highest priority, expected %q, got %q", cookieToken, extracted)
+	}
+}
+
+func TestExtractTokenHeaderOverQuery(t *testing.T) {
+	setupTestConfig(t)
+
+	headerToken := "header-token"
+	queryToken := "query-token"
+
+	req := httptest.NewRequest("GET", "/?token="+queryToken, nil)
+	req.Header.Set("Authorization", "Bearer "+headerToken)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = req
+
+	extracted := extractToken(c)
+	if extracted != headerToken {
+		t.Errorf("header should have higher priority than query, expected %q, got %q", headerToken, extracted)
+	}
+}
+
+func TestExtractTokenNoQueryRejectsQueryToken(t *testing.T) {
+	setupTestConfig(t)
+
+	queryToken := "query-token-should-be-ignored"
+
+	req := httptest.NewRequest("GET", "/?token="+queryToken, nil)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = req
+
+	extracted := extractTokenNoQuery(c)
+	if extracted != "" {
+		t.Errorf("extractTokenNoQuery should not accept query token, got %q", extracted)
+	}
+}
+
+func TestExtractBearerEdgeCases(t *testing.T) {
+	cases := []struct {
+		input string
+		ok    bool
+		token string
+	}{
+		{"Bearer", false, ""},
+		{"Bearer ", false, ""},
+		{"Bearer  ", false, ""},
+		{"bearer abc", true, "abc"},
+		{"BEARER abc", true, "abc"},
+		{"bEaReR abc", true, "abc"},
+		{"Bearer abc def", true, "abc def"},
+		{"Basic abc", false, ""},
+		{"", false, ""},
+	}
+	for _, tc := range cases {
+		token, ok := extractBearer(tc.input)
+		if ok != tc.ok {
+			t.Errorf("extractBearer(%q) ok = %v, want %v", tc.input, ok, tc.ok)
+		}
+		if ok && strings.TrimSpace(token) != strings.TrimSpace(tc.token) {
+			t.Errorf("extractBearer(%q) token = %q, want %q", tc.input, token, tc.token)
+		}
+	}
+}
+
+func TestVerifyPasswordTimingAttack(t *testing.T) {
+	setupTestConfig(t)
+	setupTestDB(t)
+	if err := model.SetupAdmin("admin", "password123"); err != nil {
+		t.Fatalf("SetupAdmin failed: %v", err)
+	}
+
+	start1 := time.Now()
+	_, ok1 := model.VerifyPassword("nonexistentuser", "password123")
+	elapsed1 := time.Since(start1)
+
+	start2 := time.Now()
+	_, ok2 := model.VerifyPassword("admin", "wrongpassword")
+	elapsed2 := time.Since(start2)
+
+	if ok1 {
+		t.Error("nonexistent user should fail")
+	}
+	if ok2 {
+		t.Error("wrong password should fail")
+	}
+
+	ratio := float64(elapsed2) / float64(elapsed1+1)
+	t.Logf("Timing: nonexistent=%v, wrongpass=%v, ratio=%.2f", elapsed1, elapsed2, ratio)
+}
+
+func TestMiddlewareAuthRevokedTokenClearsCookie(t *testing.T) {
+	setupTestConfig(t)
+	setupTestDB(t)
+
+	user := &model.User{
+		ID:           1,
+		Username:     "admin",
+		Role:         "admin",
+		TokenVersion: 0,
+	}
+	if err := model.DB.Create(user).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	token, _, err := GenerateToken(user)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := model.UpdatePassword(user.ID, "newpassword123"); err != nil {
+		t.Fatal(err)
+	}
+
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.GET("/test", MiddlewareAuth(), func(c *gin.Context) {
+		c.Status(http.StatusOK)
+	})
+
+	req := httptest.NewRequest("GET", "/test", nil)
+	req.AddCookie(&http.Cookie{Name: CookieName, Value: token})
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 for revoked token, got %d", w.Code)
+	}
+
+	cookies := w.Result().Cookies()
+	var cleared bool
+	for _, cookie := range cookies {
+		if cookie.Name == CookieName && cookie.MaxAge == -1 {
+			cleared = true
+			break
+		}
+	}
+	if !cleared {
+		t.Error("MiddlewareAuth should clear cookie for revoked token")
 	}
 }

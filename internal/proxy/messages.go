@@ -342,11 +342,16 @@ func extractUsageMessages(b []byte) (int, int) {
 	if v, ok := u["output_tokens"].(float64); ok {
 		ct = int(v)
 	}
+	cacheCreate := 0
+	cacheRead := 0
 	if v, ok := u["cache_creation_input_tokens"].(float64); ok {
-		pt += int(v)
+		cacheCreate = int(v)
 	}
 	if v, ok := u["cache_read_input_tokens"].(float64); ok {
-		pt += int(v)
+		cacheRead = int(v)
+	}
+	if cacheCreate+cacheRead > pt {
+		pt = cacheCreate + cacheRead
 	}
 	return pt, ct
 }

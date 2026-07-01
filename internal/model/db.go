@@ -122,7 +122,7 @@ func IsSetupRequired() bool {
 	var count int64
 	if err := DB.Model(&User{}).Count(&count).Error; err != nil {
 		log.Printf("[fci] IsSetupRequired 查询失败: %v", err)
-		return true
+		return false
 	}
 	return count == 0
 }
@@ -170,13 +170,21 @@ func isUniqueConstraintErr(err error) bool {
 	return strings.Contains(s, "UNIQUE constraint failed") || strings.Contains(s, "Duplicate entry")
 }
 
+var dummyHash = "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"
+
+func verifyPasswordWithHash(hash string, password string) bool {
+	err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
+	return err == nil
+}
+
 // VerifyPassword 校验密码
 func VerifyPassword(username, password string) (*User, bool) {
 	var u User
 	if err := DB.Where("username = ? AND status = 1", username).First(&u).Error; err != nil {
+		verifyPasswordWithHash(dummyHash, password)
 		return nil, false
 	}
-	if err := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(password)); err != nil {
+	if !verifyPasswordWithHash(u.PasswordHash, password) {
 		return nil, false
 	}
 	return &u, true
@@ -186,9 +194,10 @@ func VerifyPassword(username, password string) (*User, bool) {
 func VerifyPasswordByID(userID uint, password string) (*User, bool) {
 	var u User
 	if err := DB.Where("id = ? AND status = 1", userID).First(&u).Error; err != nil {
+		verifyPasswordWithHash(dummyHash, password)
 		return nil, false
 	}
-	if err := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(password)); err != nil {
+	if !verifyPasswordWithHash(u.PasswordHash, password) {
 		return nil, false
 	}
 	return &u, true
@@ -196,6 +205,9 @@ func VerifyPasswordByID(userID uint, password string) (*User, bool) {
 
 // UpdatePassword 更新密码并递增token_version, 立即使所有旧JWT失效
 func UpdatePassword(userID uint, newPlain string) error {
+	if err := config.ValidatePasswordStrength(newPlain); err != nil {
+		return err
+	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(newPlain), bcrypt.DefaultCost)
 	if err != nil {
 		return err

@@ -1,7 +1,9 @@
 package cache
 
 import (
+	"container/list"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -11,6 +13,7 @@ import (
 func resetTestStore(maxItems int, ttl time.Duration) *Store {
 	s := &Store{
 		items:    make(map[string]*Entry),
+		order:    list.New(),
 		maxItems: maxItems,
 		ttl:      ttl,
 		enabled:  true,
@@ -18,6 +21,8 @@ func resetTestStore(maxItems int, ttl time.Duration) *Store {
 	}
 	store.Store(s)
 	flights = make(map[string]*call)
+	atomic.StoreInt64(&hits, 0)
+	atomic.StoreInt64(&misses, 0)
 	return s
 }
 
@@ -85,8 +90,8 @@ func TestLRUEviction(t *testing.T) {
 	PutWithMeta("b", "m", []byte("b"), false, 0, "")
 	PutWithMeta("c", "m", []byte("c"), false, 0, "")
 
-	if len(s.items) != 3 {
-		t.Errorf("expected 3 items, got %d", len(s.items))
+	if s.order.Len() != 3 {
+		t.Errorf("expected 3 items, got %d", s.order.Len())
 	}
 
 	_, ok := Get("a")
@@ -96,8 +101,8 @@ func TestLRUEviction(t *testing.T) {
 
 	PutWithMeta("d", "m", []byte("d"), false, 0, "")
 
-	if len(s.items) != 3 {
-		t.Errorf("expected 3 items after eviction, got %d", len(s.items))
+	if s.order.Len() != 3 {
+		t.Errorf("expected 3 items after eviction, got %d", s.order.Len())
 	}
 
 	if _, ok := s.items["b"]; ok {
@@ -111,6 +116,55 @@ func TestLRUEviction(t *testing.T) {
 	}
 	if _, ok := s.items["d"]; !ok {
 		t.Error("d should exist")
+	}
+}
+
+func TestLRUOrder(t *testing.T) {
+	s := resetTestStore(5, time.Hour)
+
+	PutWithMeta("a", "m", []byte("a"), false, 0, "")
+	PutWithMeta("b", "m", []byte("b"), false, 0, "")
+	PutWithMeta("c", "m", []byte("c"), false, 0, "")
+
+	front := s.order.Front().Value.(*Entry)
+	if front.Key != "a" {
+		t.Errorf("expected front=a, got %s", front.Key)
+	}
+	back := s.order.Back().Value.(*Entry)
+	if back.Key != "c" {
+		t.Errorf("expected back=c, got %s", back.Key)
+	}
+
+	Get("a")
+	back = s.order.Back().Value.(*Entry)
+	if back.Key != "a" {
+		t.Errorf("after Get(a), back should be a, got %s", back.Key)
+	}
+}
+
+func TestCacheConcurrency(t *testing.T) {
+	resetTestStore(1000, time.Hour)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			key := fmt.Sprintf("key-%d", idx%20)
+			PutWithMeta(key, "m", []byte("value"), false, 0, "")
+			Get(key)
+		}(i)
+	}
+	wg.Wait()
+}
+
+func TestCacheCloseStopsGoroutine(t *testing.T) {
+	s := resetTestStore(100, time.Hour)
+	s.Close()
+	select {
+	case <-s.stopCh:
+	case <-time.After(time.Second):
+		t.Error("stopCh should be closed after Close()")
 	}
 }
 

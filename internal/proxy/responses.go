@@ -431,12 +431,16 @@ func updateUsageFromSSE(line []byte, pt, ct int) (int, int) {
 	if v, ok := u["output_tokens"].(float64); ok {
 		ct = int(v)
 	}
-	// Anthropic prompt caching 字段计入 input(与非流式 extractUsageMessages 一致)
+	cacheCreate := 0
+	cacheRead := 0
 	if v, ok := u["cache_creation_input_tokens"].(float64); ok {
-		pt += int(v)
+		cacheCreate = int(v)
 	}
 	if v, ok := u["cache_read_input_tokens"].(float64); ok {
-		pt += int(v)
+		cacheRead = int(v)
+	}
+	if cacheCreate+cacheRead > pt {
+		pt = cacheCreate + cacheRead
 	}
 	return pt, ct
 }
@@ -466,12 +470,16 @@ func extractUsage(b []byte) (int, int) {
 	if v, ok := u["output_tokens"].(float64); ok {
 		ct = int(v)
 	}
-	// Anthropic prompt caching 字段计入 input
+	cacheCreate := 0
+	cacheRead := 0
 	if v, ok := u["cache_creation_input_tokens"].(float64); ok {
-		pt += int(v)
+		cacheCreate = int(v)
 	}
 	if v, ok := u["cache_read_input_tokens"].(float64); ok {
-		pt += int(v)
+		cacheRead = int(v)
+	}
+	if cacheCreate+cacheRead > pt {
+		pt = cacheCreate + cacheRead
 	}
 	return pt, ct
 }

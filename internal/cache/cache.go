@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"container/list"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -56,27 +57,30 @@ func Do(key string, fn func() (*Entry, error)) (val *Entry, err error) {
 }
 
 type Entry struct {
-	Key          string
-	Value        []byte
-	StreamEvents [][]byte
-	IsStream     bool
-	ModelName    string
-	CreatedAt    time.Time
-	ExpiresAt    time.Time
-	HitCount     int64
-	HasImage     bool
-	ImageCount   int
+	Key            string
+	Value          []byte
+	StreamEvents   [][]byte
+	IsStream       bool
+	ModelName      string
+	CreatedAt      time.Time
+	ExpiresAt      time.Time
+	HitCount       int64
+	HasImage       bool
+	ImageCount     int
 	ImageModelUsed string
+
+	element *list.Element
 }
 
 type Store struct {
 	mu       sync.RWMutex
 	items    map[string]*Entry
-	order    []string
+	order    *list.List
 	maxItems int
 	ttl      time.Duration
 	enabled  bool
 	stopCh   chan struct{}
+	closed   int32
 }
 
 var (
@@ -91,6 +95,7 @@ func Init() {
 		cfg := config.Get()
 		s := &Store{
 			items:    make(map[string]*Entry),
+			order:    list.New(),
 			maxItems: cfg.CacheMaxItems,
 			ttl:      defaultCacheTTL,
 			enabled:  cfg.CacheEnabled,
@@ -106,7 +111,9 @@ func Init() {
 func (s *Store) cleanupLoop() {
 	defer func() {
 		if r := recover(); r != nil {
-			go s.cleanupLoop()
+			if atomic.LoadInt32(&s.closed) == 0 {
+				go s.cleanupLoop()
+			}
 		}
 	}()
 	ticker := time.NewTicker(time.Hour)
@@ -121,13 +128,22 @@ func (s *Store) cleanupLoop() {
 	}
 }
 
+func (s *Store) Close() {
+	if atomic.CompareAndSwapInt32(&s.closed, 0, 1) {
+		close(s.stopCh)
+	}
+}
+
 func (s *Store) cleanupExpired() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now()
-	for k, e := range s.items {
-		if !e.ExpiresAt.IsZero() && now.After(e.ExpiresAt) {
-			s.deleteLocked(k)
+	var next *list.Element
+	for e := s.order.Front(); e != nil; e = next {
+		next = e.Next()
+		entry := e.Value.(*Entry)
+		if !entry.ExpiresAt.IsZero() && now.After(entry.ExpiresAt) {
+			s.removeElementLocked(e)
 		}
 	}
 }
@@ -158,41 +174,38 @@ func Key(endpoint, modelGroup string, canonicalInput []byte) string {
 func Get(key string) (*Entry, bool) {
 	s := loadStore()
 	if s == nil || !s.enabled {
+		atomic.AddInt64(&misses, 1)
 		return nil, false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	e, ok := s.items[key]
 	if !ok {
+		atomic.AddInt64(&misses, 1)
 		return nil, false
 	}
 	if !e.ExpiresAt.IsZero() && time.Now().After(e.ExpiresAt) {
-		s.deleteLocked(key)
+		s.removeElementLocked(e.element)
+		atomic.AddInt64(&misses, 1)
 		return nil, false
 	}
-	e.HitCount++
-	s.touchLocked(key)
+	atomic.AddInt64(&e.HitCount, 1)
+	s.moveToBackLocked(e)
+	atomic.AddInt64(&hits, 1)
 	return e, true
 }
 
-func (s *Store) touchLocked(key string) {
-	for i, k := range s.order {
-		if k == key {
-			s.order = append(s.order[:i], s.order[i+1:]...)
-			s.order = append(s.order, key)
-			return
-		}
+func (s *Store) moveToBackLocked(e *Entry) {
+	if e.element != nil {
+		s.order.MoveToBack(e.element)
 	}
 }
 
-func (s *Store) deleteLocked(key string) {
-	delete(s.items, key)
-	for i, k := range s.order {
-		if k == key {
-			s.order = append(s.order[:i], s.order[i+1:]...)
-			return
-		}
-	}
+func (s *Store) removeElementLocked(el *list.Element) {
+	entry := el.Value.(*Entry)
+	s.order.Remove(el)
+	delete(s.items, entry.Key)
+	entry.element = nil
 }
 
 func jitterExpiry(ttl time.Duration) time.Time {
@@ -237,20 +250,22 @@ func putEntry(key string, e *Entry) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	e.ExpiresAt = jitterExpiry(s.ttl)
-	if _, exists := s.items[key]; !exists {
-		s.order = append(s.order, key)
-	} else {
-		s.touchLocked(key)
+	if existing, ok := s.items[key]; ok {
+		if existing.element != nil {
+			s.order.Remove(existing.element)
+		}
 	}
+	e.element = s.order.PushBack(e)
 	s.items[key] = e
 	s.evictLocked()
 }
 
 func (s *Store) evictLocked() {
-	for len(s.order) > s.maxItems && len(s.order) > 0 {
-		k := s.order[0]
-		s.order = s.order[1:]
-		delete(s.items, k)
+	for s.order.Len() > s.maxItems && s.order.Len() > 0 {
+		front := s.order.Front()
+		if front != nil {
+			s.removeElementLocked(front)
+		}
 	}
 }
 
@@ -280,7 +295,7 @@ func GetStats() Stats {
 	defer s.mu.RUnlock()
 	return Stats{
 		Enabled:  s.enabled,
-		Items:    len(s.items),
+		Items:    s.order.Len(),
 		MaxItems: s.maxItems,
 		Hits:     atomic.LoadInt64(&hits),
 		Misses:   atomic.LoadInt64(&misses),
@@ -296,6 +311,6 @@ func Clear() int {
 	defer s.mu.Unlock()
 	n := len(s.items)
 	s.items = make(map[string]*Entry)
-	s.order = nil
+	s.order.Init()
 	return n
 }

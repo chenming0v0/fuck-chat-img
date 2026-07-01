@@ -163,7 +163,11 @@ func extractBearer(h string) (string, bool) {
 	if !strings.EqualFold(h[:len(scheme)], scheme) {
 		return "", false
 	}
-	return strings.TrimSpace(h[len(scheme):]), true
+	token := strings.TrimSpace(h[len(scheme):])
+	if token == "" {
+		return "", false
+	}
+	return token, true
 }
 
 // extractProxyKey 仅从 Header 提取 FCI_PROXY_KEY(不允许 query)
@@ -222,35 +226,73 @@ func MiddlewareAdmin() gin.HandlerFunc {
 // 安全策略(实现必须与文档承诺一致, H6 修复点):
 //  1. 若配置了 FCI_PROXY_KEY: 客户端用该 key(仅 Header, 不允许 query 避免日志泄漏)访问, 或用有效 JWT
 //  2. 若未配置 FCI_PROXY_KEY: 仅允许管理员 JWT 访问(避免任意登录态用户白嫖管理员上游额度)
-//  3. JWT 可走 Header 或 query(后者用于 SSE/EventSource); query 不接受 proxy key
+//  3. JWT 可走 Cookie、Header 或 query(后者用于 SSE/EventSource); query 不接受 proxy key
+//  4. Cookie 中的无效/revoked JWT 应被清除, 且不应阻断 Header 中有效 JWT 或 ProxyKey 的认证
 func MiddlewareProxyAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		cfg := config.Get()
-		token := extractToken(c)
 		proxyKey := cfg.ProxyKey
-		if token != "" {
-			if claims, err := ParseToken(token); err == nil {
-				if !ValidateTokenVersion(claims) {
-					c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-						"error": gin.H{"message": "token revoked", "type": "auth_error", "code": 401},
-					})
-					return
-				}
+
+		var validClaims *Claims
+		var cookieCleared bool
+
+		cookieToken, cookieErr := c.Cookie(CookieName)
+		if cookieErr == nil && cookieToken != "" {
+			if claims, err := ParseToken(cookieToken); err == nil && ValidateTokenVersion(claims) {
 				isAdmin := claims.Role == "admin"
-				if !isAdmin && proxyKey == "" {
-					c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
-						"error": gin.H{"message": "non-admin JWT not allowed without FCI_PROXY_KEY", "type": "auth_error", "code": 403},
-					})
-					return
+				if isAdmin || proxyKey != "" {
+					validClaims = claims
 				}
-				c.Set(ContextKeyUserID, claims.UserID)
-				c.Set(ContextKeyUsername, claims.Username)
-				c.Set(ContextKeyRole, claims.Role)
-				c.Set(ContextKeyAdmin, isAdmin)
-				c.Next()
-				return
+			} else {
+				ClearAuthCookie(c)
+				cookieCleared = true
 			}
 		}
+
+		if validClaims == nil {
+			authHeader := c.GetHeader("Authorization")
+			if authHeader != "" {
+				if bearerToken, ok := extractBearer(authHeader); ok {
+					if proxyKey != "" && subtle.ConstantTimeCompare([]byte(bearerToken), []byte(proxyKey)) == 1 {
+						c.Set(ContextKeyUserID, ProxyUserID)
+						c.Set(ContextKeyUsername, "__proxy__")
+						c.Set(ContextKeyRole, "proxy")
+						c.Set(ContextKeyAdmin, false)
+						c.Next()
+						return
+					}
+					if claims, err := ParseToken(bearerToken); err == nil && ValidateTokenVersion(claims) {
+						isAdmin := claims.Role == "admin"
+						if isAdmin || proxyKey != "" {
+							validClaims = claims
+						}
+					}
+				}
+			}
+		}
+
+		if validClaims == nil {
+			queryToken := c.Query("token")
+			if queryToken != "" {
+				if claims, err := ParseToken(queryToken); err == nil && ValidateTokenVersion(claims) {
+					isAdmin := claims.Role == "admin"
+					if isAdmin || proxyKey != "" {
+						validClaims = claims
+					}
+				}
+			}
+		}
+
+		if validClaims != nil {
+			isAdmin := validClaims.Role == "admin"
+			c.Set(ContextKeyUserID, validClaims.UserID)
+			c.Set(ContextKeyUsername, validClaims.Username)
+			c.Set(ContextKeyRole, validClaims.Role)
+			c.Set(ContextKeyAdmin, isAdmin)
+			c.Next()
+			return
+		}
+
 		if proxyKey != "" {
 			pk := extractProxyKey(c)
 			if pk != "" && subtle.ConstantTimeCompare([]byte(pk), []byte(proxyKey)) == 1 {
@@ -259,6 +301,12 @@ func MiddlewareProxyAuth() gin.HandlerFunc {
 				c.Set(ContextKeyRole, "proxy")
 				c.Set(ContextKeyAdmin, false)
 				c.Next()
+				return
+			}
+			if cookieCleared {
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+					"error": gin.H{"message": "token revoked", "type": "auth_error", "code": 401},
+				})
 				return
 			}
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{

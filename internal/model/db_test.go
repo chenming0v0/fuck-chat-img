@@ -2,6 +2,7 @@ package model
 
 import (
 	"testing"
+	"time"
 )
 
 func setupTestDB(t *testing.T) {
@@ -177,5 +178,84 @@ func TestGetUserByID(t *testing.T) {
 	}
 	if _, err := GetUserByID(99999); err == nil {
 		t.Error("GetUserByID should return error for non-existent user")
+	}
+}
+
+func TestUpdatePasswordRejectsWeakPassword(t *testing.T) {
+	setupTestDB(t)
+	if err := SetupAdmin("admin", "password123"); err != nil {
+		t.Fatalf("SetupAdmin failed: %v", err)
+	}
+	u, _ := VerifyPassword("admin", "password123")
+
+	if err := UpdatePassword(u.ID, "12345"); err == nil {
+		t.Error("UpdatePassword should reject too short password")
+	}
+	if err := UpdatePassword(u.ID, ""); err == nil {
+		t.Error("UpdatePassword should reject empty password")
+	}
+	longPassword := make([]byte, 73)
+	for i := range longPassword {
+		longPassword[i] = 'a'
+	}
+	if err := UpdatePassword(u.ID, string(longPassword)); err == nil {
+		t.Error("UpdatePassword should reject password > 72 bytes")
+	}
+
+	shortBoundary := "123456"
+	if err := UpdatePassword(u.ID, shortBoundary); err != nil {
+		t.Errorf("UpdatePassword should accept 6-char password, got: %v", err)
+	}
+}
+
+func TestUpdatePasswordBoundaryLengths(t *testing.T) {
+	setupTestDB(t)
+	if err := SetupAdmin("admin", "password123"); err != nil {
+		t.Fatalf("SetupAdmin failed: %v", err)
+	}
+	u, _ := VerifyPassword("admin", "password123")
+
+	pw6 := "abcdef"
+	if err := UpdatePassword(u.ID, pw6); err != nil {
+		t.Errorf("6-char password should be accepted: %v", err)
+	}
+
+	pw72 := make([]byte, 72)
+	for i := range pw72 {
+		pw72[i] = 'x'
+	}
+	if err := UpdatePassword(u.ID, string(pw72)); err != nil {
+		t.Errorf("72-char password should be accepted: %v", err)
+	}
+	if _, ok := VerifyPassword("admin", string(pw72)); !ok {
+		t.Error("72-char password should work after update")
+	}
+}
+
+func TestVerifyPasswordTimingConsistency(t *testing.T) {
+	setupTestDB(t)
+	if err := SetupAdmin("admin", "password123"); err != nil {
+		t.Fatalf("SetupAdmin failed: %v", err)
+	}
+
+	var totalNonexistent time.Duration
+	var totalWrongPass time.Duration
+	iterations := 5
+	for i := 0; i < iterations; i++ {
+		start := time.Now()
+		VerifyPassword("nonexistentuser_"+string(rune('a'+i)), "password123")
+		totalNonexistent += time.Since(start)
+
+		start = time.Now()
+		VerifyPassword("admin", "wrongpassword_"+string(rune('a'+i)))
+		totalWrongPass += time.Since(start)
+	}
+	avgNonExistent := totalNonexistent / time.Duration(iterations)
+	avgWrongPass := totalWrongPass / time.Duration(iterations)
+
+	t.Logf("Average timing: nonexistent=%v, wrongpass=%v", avgNonExistent, avgWrongPass)
+
+	if avgNonExistent < time.Millisecond*10 {
+		t.Errorf("non-existent user path seems too fast (%v), may not be doing dummy bcrypt", avgNonExistent)
 	}
 }
