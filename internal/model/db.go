@@ -17,6 +17,41 @@ import (
 
 var DB *gorm.DB
 
+func buildDSN(path string) string {
+	sep := "?"
+	if strings.Contains(path, "?") {
+		sep = "&"
+	}
+	if strings.Contains(path, ":memory:") {
+		return path + sep + "_busy_timeout=5000&_foreign_keys=ON"
+	}
+	return path + sep + "_journal_mode=WAL&_busy_timeout=5000&_synchronous=NORMAL&_foreign_keys=ON"
+}
+
+func initDB(dsn string, needEnv bool) error {
+	db, err := gorm.Open(sqlite.Open(buildDSN(dsn)), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Warn),
+	})
+	if err != nil {
+		return err
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		return err
+	}
+	sqlDB.SetMaxOpenConns(1)
+	if err := db.AutoMigrate(&User{}, &ModelGroup{}, &History{}); err != nil {
+		return err
+	}
+	DB = db
+	if needEnv {
+		if err := initAdminFromEnv(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Init 初始化数据库
 func Init() error {
 	cfg := config.Get()
@@ -25,23 +60,11 @@ func Init() error {
 			return err
 		}
 	}
-	db, err := gorm.Open(sqlite.Open(cfg.DBPath), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Warn),
-	})
-	if err != nil {
-		return err
-	}
-	if err := db.AutoMigrate(&User{}, &ModelGroup{}, &History{}); err != nil {
-		return err
-	}
-	DB = db
+	return initDB(cfg.DBPath, true)
+}
 
-	// 不再创建默认密码账户; 首次启动时由用户在 Web 设置页输入管理密码
-	// 若通过 FCI_ADMIN_USER / FCI_ADMIN_PASS 环境变量预置, 则在 initAdminFromEnv 中创建
-	if err := initAdminFromEnv(); err != nil {
-		return err
-	}
-	return nil
+func InitTestDB(dsn string) error {
+	return initDB(dsn, false)
 }
 
 // initAdminFromEnv 若设置了 FCI_ADMIN_USER + FCI_ADMIN_PASS 环境变量,
@@ -99,7 +122,7 @@ func IsSetupRequired() bool {
 	var count int64
 	if err := DB.Model(&User{}).Count(&count).Error; err != nil {
 		log.Printf("[fci] IsSetupRequired 查询失败: %v", err)
-		return false
+		return true
 	}
 	return count == 0
 }
@@ -177,10 +200,17 @@ func UpdatePassword(userID uint, newPlain string) error {
 	if err != nil {
 		return err
 	}
-	return DB.Model(&User{}).Where("id = ?", userID).Updates(map[string]interface{}{
+	result := DB.Model(&User{}).Where("id = ?", userID).Updates(map[string]interface{}{
 		"password_hash": string(hash),
 		"token_version": gorm.Expr("token_version + 1"),
-	}).Error
+	})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return errors.New("用户不存在")
+	}
+	return nil
 }
 
 // GetUserTokenVersion 获取用户当前token版本

@@ -2,12 +2,14 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 )
@@ -157,24 +159,21 @@ type ImageModelsConfig struct {
 
 // recognizeImage 用图片模型轮询识别单张图片, 返回文本描述
 // 若所有图片模型都失败则返回 error (满足"图片识别失败直接返回报错")
-func recognizeImage(imgModels []UpstreamModelRT, strategy string, prompt string, imageURL, imageB64 string, client *http.Client) (string, string, error) {
+func recognizeImage(ctx context.Context, imgModels []UpstreamModelRT, strategy string, prompt string, imageURL, imageB64 string, client *http.Client) (string, string, error) {
 	if len(imgModels) == 0 {
 		return "", "", errors.New("未配置图片模型")
 	}
 	var lastErr error
 	for _, m := range imgModels {
-		desc, err := callImageModel(m, prompt, imageURL, imageB64, client)
+		desc, err := callImageModel(ctx, m, prompt, imageURL, imageB64, client)
 		if err == nil {
 			if strings.TrimSpace(desc) != "" {
 				return desc, m.DisplayName(), nil
 			}
-			// err==nil 但 desc 为空: 单独构造有意义的错误, 避免 fmt.Errorf("%v", nil) 产生 "<nil>"
 			lastErr = fmt.Errorf("[%s] 返回空结果", m.DisplayName())
 		} else {
 			lastErr = fmt.Errorf("[%s] %v", m.DisplayName(), err)
 		}
-		// round_robin 与 failover 的差异已在 nextImageModels(起点不同)体现,
-		// 此处统一逐个尝试直到成功; strategy 参数保留以备未来扩展.
 		_ = strategy
 	}
 	if lastErr == nil {
@@ -184,7 +183,7 @@ func recognizeImage(imgModels []UpstreamModelRT, strategy string, prompt string,
 }
 
 // callImageModel 调用单个图片模型(走 OpenAI Chat Completions 兼容接口)
-func callImageModel(m UpstreamModelRT, prompt string, imageURL, imageB64 string, client *http.Client) (string, error) {
+func callImageModel(ctx context.Context, m UpstreamModelRT, prompt string, imageURL, imageB64 string, client *http.Client) (string, error) {
 	if prompt == "" {
 		prompt = "请详细描述这张图片的内容,包括其中的文字、物体、场景、颜色等关键信息。"
 	}
@@ -205,19 +204,19 @@ func callImageModel(m UpstreamModelRT, prompt string, imageURL, imageB64 string,
 	body := map[string]interface{}{
 		"model":    m.Model,
 		"messages": []map[string]interface{}{{"role": "user", "content": content}},
-		// 显式声明非流式: 部分兼容网关默认走流式会返回 text/event-stream, 导致 json.Unmarshal 失败
-		"stream": false,
+		"stream":   false,
 	}
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {
 		return "", err
 	}
 	url := m.ChatURL()
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(bodyBytes))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Authorization", "Bearer "+m.APIKey)
 	resp, err := client.Do(req)
 	if err != nil {
@@ -226,6 +225,7 @@ func callImageModel(m UpstreamModelRT, prompt string, imageURL, imageB64 string,
 	defer resp.Body.Close()
 	respBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
+		log.Printf("read image model response error: %v", err)
 		return "", err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {

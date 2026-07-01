@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -137,8 +138,8 @@ func TestCacheKey_ConsistentAcrossFormats(t *testing.T) {
 	openaiBody := json.RawMessage(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"},{"type":"image_url","image_url":{"url":"` + dataURL + `"}}]}]}`)
 	claudeBody := json.RawMessage(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + rawB64 + `"}}]}]}`)
 
-	keyOpenAI := cache.Key(group, normalizeForCache(openaiBody))
-	keyClaude := cache.Key(group, normalizeForCache(claudeBody))
+	keyOpenAI := cache.Key("chat", group, normalizeForCache(openaiBody))
+	keyClaude := cache.Key("chat", group, normalizeForCache(claudeBody))
 	if keyOpenAI != keyClaude {
 		t.Errorf("OpenAI Chat 与 Claude Messages(同 messages+text 形状)应产生相同缓存键:\n  OpenAI: %s\n  Claude: %s", keyOpenAI, keyClaude)
 	}
@@ -151,8 +152,8 @@ func TestCacheKey_CodexToolForm_StableAcrossVolatileFields(t *testing.T) {
 	// 同样的 role=tool + 内嵌 base64 图片, 但外层 id/created_at 不同
 	a := json.RawMessage(`{"id":"req-1","created_at":100,"messages":[{"role":"tool","content":"{\"image\":\"` + dataURL + `\",\"meta\":\"x\"}"}]}`)
 	b := json.RawMessage(`{"id":"req-2","created_at":999,"messages":[{"role":"tool","content":"{\"image\":\"` + dataURL + `\",\"meta\":\"x\"}"}]}`)
-	ka := cache.Key(group, normalizeForCache(a))
-	kb := cache.Key(group, normalizeForCache(b))
+	ka := cache.Key("chat", group, normalizeForCache(a))
+	kb := cache.Key("chat", group, normalizeForCache(b))
 	if ka != kb {
 		t.Errorf("Codex tool 形态: 仅 id/created_at 差异应命中相同缓存键:\n  a=%s\n  b=%s", ka, kb)
 	}
@@ -163,8 +164,8 @@ func TestCacheKey_DifferentImagesDifferent(t *testing.T) {
 	const group = "g"
 	a := json.RawMessage(`{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}]}]}`)
 	b := json.RawMessage(`{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,BBBB"}}]}]}`)
-	ka := cache.Key(group, normalizeForCache(a))
-	kb := cache.Key(group, normalizeForCache(b))
+	ka := cache.Key("chat", group, normalizeForCache(a))
+	kb := cache.Key("chat", group, normalizeForCache(b))
 	if ka == kb {
 		t.Errorf("不同图片应产生不同缓存键, 都得到 %s", ka)
 	}
@@ -175,7 +176,7 @@ func TestCacheKey_IgnoresMediaTypeDifference(t *testing.T) {
 	const group = "g"
 	png := json.RawMessage(`{"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + rawB64 + `"}}]}]}`)
 	jpeg := json.RawMessage(`{"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"` + rawB64 + `"}}]}]}`)
-	if cache.Key(group, normalizeForCache(png)) != cache.Key(group, normalizeForCache(jpeg)) {
+	if cache.Key("chat", group, normalizeForCache(png)) != cache.Key("chat", group, normalizeForCache(jpeg)) {
 		t.Errorf("media_type 不同但图片内容相同应命中同一缓存键")
 	}
 }
@@ -185,7 +186,7 @@ func TestCacheKey_VolatileKeysStripped(t *testing.T) {
 	const group = "g"
 	a := json.RawMessage(`{"id":"abc","created_at":123,"timestamp":456,"messages":[{"role":"user","content":"hi"}]}`)
 	b := json.RawMessage(`{"id":"xyz","created_at":999,"timestamp":0,"messages":[{"role":"user","content":"hi"}]}`)
-	if cache.Key(group, normalizeForCache(a)) != cache.Key(group, normalizeForCache(b)) {
+	if cache.Key("chat", group, normalizeForCache(a)) != cache.Key("chat", group, normalizeForCache(b)) {
 		t.Errorf("易变字段差异不应改变缓存键")
 	}
 }
@@ -195,7 +196,7 @@ func TestCacheKey_OrderSensitive(t *testing.T) {
 	const group = "g"
 	a := json.RawMessage(`{"messages":[{"role":"user","content":"A"},{"role":"user","content":"B"}]}`)
 	b := json.RawMessage(`{"messages":[{"role":"user","content":"B"},{"role":"user","content":"A"}]}`)
-	if cache.Key(group, normalizeForCache(a)) == cache.Key(group, normalizeForCache(b)) {
+	if cache.Key("chat", group, normalizeForCache(a)) == cache.Key("chat", group, normalizeForCache(b)) {
 		t.Errorf("消息顺序变化应导致不同缓存键")
 	}
 }
@@ -319,9 +320,9 @@ func TestProcessImages_ClaudeImageSource(t *testing.T) {
 	swapHTTPClient(t, srv.Client())
 	g := newTestGroupRuntime(srv.URL)
 
-	msgs := json.RawMessage(`{"messages":[{"role":"user","content":[{"type":"text","text":"这是什么?"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + rawB64 + `"}}]}]}`)
+	msgs := json.RawMessage(`[{"role":"user","content":[{"type":"text","text":"这是什么?"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + rawB64 + `"}}]}]`)
 
-	hasImg, cnt, _, modified, err := processImagesForMessagesValue(g, msgs)
+	hasImg, cnt, _, modified, _, err := processImagesForMessagesValue(g, msgs, nil, context.Background())
 	if err != nil {
 		t.Fatalf("不应报错: %v", err)
 	}
@@ -414,8 +415,8 @@ func TestCacheHit_SameImageDifferentFormats(t *testing.T) {
 
 	// 验证两次规范化后的缓存键相同
 	const groupName = "cache-test"
-	key1 := cache.Key(groupName, normalizeForCache(mod1))
-	key2 := cache.Key(groupName, normalizeForCache(mod2))
+	key1 := cache.Key("chat", groupName, normalizeForCache(mod1))
+	key2 := cache.Key("chat", groupName, normalizeForCache(mod2))
 	if key1 != key2 {
 		t.Errorf("相同图片不同格式应产生相同缓存键(用户强调: 缓存要做好):\n  key1=%s\n  key2=%s", key1, key2)
 	}

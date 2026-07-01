@@ -6,6 +6,7 @@
 *.db-journal
 *.db-wal
 *.db-shm
+*.test
 .env
 !.env.example
 *.log
