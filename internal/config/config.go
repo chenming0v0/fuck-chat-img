@@ -14,14 +14,13 @@ import (
 const (
 	// MinPasswordLength 全项目统一的密码最小长度(Setup / ChangePassword / initAdminFromEnv 共用)
 	MinPasswordLength = 6
+	// MaxPasswordLength 全项目统一的密码最大长度.
+	// bcrypt 会对超过 72 字节的密码静默截断只取前 72 字节, 两个前 72 位相同的长密码哈希一致,
+	// 削弱安全边际. 这里在入口处统一拒绝超长密码, 避免静默截断(Low-7).
+	MaxPasswordLength     = 72
 	defaultCacheMaxItems  = 10000
 	defaultRequestTimeout = 300
 )
-
-// MaxPasswordLength 全项目统一的密码最大长度.
-// bcrypt 会对超过 72 字节的密码静默截断只取前 72 字节, 两个前 72 位相同的长密码哈希一致,
-// 削弱安全边际. 这里在入口处统一拒绝超长密码, 避免静默截断(Low-7).
-const MaxPasswordLength = 72
 
 // Config 全局配置
 type Config struct {
@@ -31,6 +30,7 @@ type Config struct {
 	JWTSecret      string
 	AdminUser      string
 	InitAdminPass  string // 通过 FCI_ADMIN_PASS 预置的明文密码(仅首次启动创建管理员时使用)
+	ProxyKey       string
 	CacheEnabled   bool
 	CacheMaxItems  int
 	RequestTimeout int // 上游请求超时(秒)
@@ -45,8 +45,8 @@ var (
 		JWTSecret:      "",
 		AdminUser:      "root",
 		CacheEnabled:   true,
-		CacheMaxItems:  10000,
-		RequestTimeout: 300,
+		CacheMaxItems:  defaultCacheMaxItems,
+		RequestTimeout: defaultRequestTimeout,
 	}
 )
 
@@ -71,8 +71,24 @@ func SetWebDirForTest(dir string) {
 	cfg.WebDir = dir
 }
 
+// SetJWTSecretForTest 仅用于测试: 覆盖JWT密钥
+func SetJWTSecretForTest(secret string) {
+	cfgMu.Lock()
+	defer cfgMu.Unlock()
+	cfg.JWTSecret = secret
+}
+
+// SetProxyKeyForTest 仅用于测试: 覆盖代理密钥
+func SetProxyKeyForTest(key string) {
+	cfgMu.Lock()
+	defer cfgMu.Unlock()
+	cfg.ProxyKey = key
+}
+
 // Load 从环境变量加载配置
 func Load() {
+	cfgMu.Lock()
+	defer cfgMu.Unlock()
 	if v := os.Getenv("FCI_LISTEN"); v != "" {
 		cfg.ListenAddr = v
 	}
@@ -92,6 +108,9 @@ func Load() {
 	if v := os.Getenv("FCI_ADMIN_PASS"); v != "" {
 		// 明文传入, 服务端在 initAdminFromEnv 中会 bcrypt 哈希后存储
 		cfg.InitAdminPass = v
+	}
+	if v := os.Getenv("FCI_PROXY_KEY"); v != "" {
+		cfg.ProxyKey = v
 	}
 	if v := os.Getenv("FCI_CACHE_ENABLED"); v != "" {
 		vLower := strings.ToLower(v)

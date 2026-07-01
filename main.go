@@ -32,25 +32,31 @@ func main() {
 	defer stop()
 
 	srv := &http.Server{
-		Addr:         cfg.ListenAddr,
-		Handler:      r,
-		ReadTimeout:  15 * time.Second,
-		IdleTimeout:  60 * time.Second,
-		WriteTimeout: 3600 * time.Second,
+		Addr:              cfg.ListenAddr,
+		Handler:           r,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       0,
+		IdleTimeout:       60 * time.Second,
+		WriteTimeout:      3600 * time.Second,
 	}
 
 	serverErr := make(chan error, 1)
 	go func() {
-		log.Printf("[fuck-chat-img] 服务已启动，监听 %s", cfg.ListenAddr)
-		log.Printf("[fuck-chat-img] 代理端点: /v1/responses /v1/chat/completions")
+		log.Printf("[fci] 服务已启动，监听 %s", cfg.ListenAddr)
+		log.Printf("[fci] 代理端点: /v1/responses /v1/chat/completions")
 		serverErr <- srv.ListenAndServe()
 	}()
 
 	select {
 	case err := <-serverErr:
-		// Server 自行退出(罕见). http.ErrServerClosed 是 Shutdown 引起的正常退出, 其余视为致命.
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("[fci] 启动失败: %v", err)
+			log.Printf("[fci] 启动失败: %v", err)
+		}
+		if sqlDB, dbErr := model.DB.DB(); dbErr == nil {
+			sqlDB.Close()
+		}
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("[fci] 服务启动失败退出")
 		}
 		return
 	case <-ctx.Done():
