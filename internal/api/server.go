@@ -86,6 +86,7 @@ func SetupRouter() *gin.Engine {
 	{
 		authed.GET("/user", UserInfo)
 		authed.POST("/user/password", ChangePassword)
+		authed.POST("/logout", Logout)
 
 		// 模型组管理(普通用户只读, 管理员可写)
 		authed.GET("/groups", ListGroups)

@@ -6,22 +6,10 @@ let isHandling401 = false
 const instance = axios.create({
   baseURL: '/api',
   timeout: 30000,
+  withCredentials: true,
 })
 
-// 请求拦截器：注入 Authorization 头
-instance.interceptors.request.use(
-  (config) => {
-    const token = localStorage.getItem('fci_token')
-    if (token) {
-      config.headers = config.headers || {}
-      config.headers.Authorization = `Bearer ${token}`
-    }
-    return config
-  },
-  (error) => Promise.reject(error),
-)
-
-// 响应拦截器：401 时清空登录态(含 role, 避免刷新后残留 admin 误判)并跳转登录页
+// 响应拦截器：401 时清空登录态并跳转登录页
 instance.interceptors.response.use(
   (response) => response.data,
   (error) => {
@@ -31,9 +19,10 @@ instance.interceptors.response.use(
         return Promise.reject(error)
       }
       isHandling401 = true
-      localStorage.removeItem('fci_token')
       localStorage.removeItem('fci_username')
       localStorage.removeItem('fci_role')
+      // 调用服务端登出清除Cookie
+      instance.post('/logout').catch(() => {})
       // 仅在浏览器环境跳转，避免刷新覆盖
       if (typeof window !== 'undefined' && window.location.pathname !== '/login' && window.location.pathname !== '/setup') {
         window.location.href = '/login'
@@ -65,13 +54,16 @@ export function getStatus() {
 
 // 2. 登录
 export function login(payload) {
-  // payload: { username, password }
   return instance.post('/login', payload)
+}
+
+// 2.0 登出
+export function logout() {
+  return instance.post('/logout')
 }
 
 // 2.1 首次设置管理员账户(仅在无任何用户时可用)
 export function setup(payload) {
-  // payload: { username, password }
   return instance.post('/setup', payload)
 }
 
@@ -82,19 +74,16 @@ export function getUser() {
 
 // 4. 修改密码
 export function changePassword(payload) {
-  // payload: { old_password, new_password }
   return instance.post('/user/password', payload)
 }
 
 // 5. 模型组
 export function listGroups(params = {}) {
-  // params: { p, size, keyword }
   return instance.get('/groups', { params })
 }
 export function getGroup(id) {
   return instance.get(`/groups/${id}`)
 }
-// 获取明文 API Key(仅管理员, 用于编辑表单回填)
 export function getGroupPlain(id) {
   return instance.get(`/groups/${id}/plain`)
 }
@@ -116,7 +105,6 @@ export function testGroup(id) {
 
 // 6. 历史
 export function listHistory(params = {}) {
-  // params: { p, size, keyword, group, success, cache_hit }
   return instance.get('/history', { params })
 }
 export function getHistory(id) {

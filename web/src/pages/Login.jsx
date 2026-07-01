@@ -44,7 +44,7 @@ export default function Login() {
     setLoading(true)
     try {
       const res = await login(values)
-      if (res?.success && res?.data?.token) {
+      if (res?.success) {
         doLogin(res.data)
         navigate('/console', { replace: true })
       } else {

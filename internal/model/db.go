@@ -52,8 +52,7 @@ func initAdminFromEnv() error {
 		return nil
 	}
 	// 创建完成后(无论成功失败)清零内存中的明文密码引用, 减少常驻内存暴露面
-	// (Go 字符串不可变无法真正擦除底层字节, 但消除 cfg.InitAdminPass 这一稳定引用)
-	defer func() { cfg.InitAdminPass = "" }()
+	defer config.ClearInitAdminPass()
 	// 与 Setup / ChangePassword 保持一致的密码强度校验, 避免环境变量误设弱密码
 	if err := config.ValidatePasswordStrength(cfg.InitAdminPass); err != nil {
 		return fmt.Errorf("FCI_ADMIN_PASS %w", err)
@@ -172,11 +171,32 @@ func VerifyPasswordByID(userID uint, password string) (*User, bool) {
 	return &u, true
 }
 
-// UpdatePassword 更新密码
+// UpdatePassword 更新密码并递增token_version, 立即使所有旧JWT失效
 func UpdatePassword(userID uint, newPlain string) error {
 	hash, err := bcrypt.GenerateFromPassword([]byte(newPlain), bcrypt.DefaultCost)
 	if err != nil {
 		return err
 	}
-	return DB.Model(&User{}).Where("id = ?", userID).Update("password_hash", string(hash)).Error
+	return DB.Model(&User{}).Where("id = ?", userID).Updates(map[string]interface{}{
+		"password_hash": string(hash),
+		"token_version": gorm.Expr("token_version + 1"),
+	}).Error
+}
+
+// GetUserTokenVersion 获取用户当前token版本
+func GetUserTokenVersion(userID uint) (int, error) {
+	var u User
+	if err := DB.Select("token_version").First(&u, userID).Error; err != nil {
+		return 0, err
+	}
+	return u.TokenVersion, nil
+}
+
+// GetUserByID 根据ID获取用户
+func GetUserByID(userID uint) (*User, error) {
+	var u User
+	if err := DB.First(&u, userID).Error; err != nil {
+		return nil, err
+	}
+	return &u, nil
 }

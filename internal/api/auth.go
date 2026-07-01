@@ -31,6 +31,7 @@ func Login(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "生成令牌失败"})
 		return
 	}
+	auth.SetAuthCookie(c, token, expiresAt)
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
@@ -41,6 +42,12 @@ func Login(c *gin.Context) {
 			"expires_at": expiresAt.Unix(),
 		},
 	})
+}
+
+// Logout 登出(清除认证Cookie)
+func Logout(c *gin.Context) {
+	auth.ClearAuthCookie(c)
+	c.JSON(http.StatusOK, gin.H{"success": true, "message": "已登出"})
 }
 
 // UserInfo 当前用户信息
@@ -92,6 +99,14 @@ func ChangePassword(c *gin.Context) {
 	if err := model.UpdatePassword(uid, req.NewPassword); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": err.Error()})
 		return
+	}
+	// 密码修改后token_version已递增, 重新加载用户签发新token(否则旧Cookie因version失效立即登出)
+	freshUser, err := model.GetUserByID(uid)
+	if err == nil {
+		token, expiresAt, genErr := auth.GenerateToken(freshUser)
+		if genErr == nil {
+			auth.SetAuthCookie(c, token, expiresAt)
+		}
 	}
 	c.JSON(http.StatusOK, gin.H{"success": true, "message": "密码已修改"})
 }

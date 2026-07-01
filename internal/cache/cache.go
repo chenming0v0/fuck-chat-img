@@ -11,6 +11,41 @@ import (
 	"github.com/fuck-chat-img/fci/internal/config"
 )
 
+type call struct {
+	wg  sync.WaitGroup
+	val *Entry
+	err error
+}
+
+var (
+	flightMu sync.Mutex
+	flights  = make(map[string]*call)
+)
+
+// Do 执行并返回缓存查询结果, 对相同key的并发请求进行合并, 防止缓存击穿
+// 仅一个请求实际执行fn, 其余并发请求等待其结果共享
+func Do(key string, fn func() (*Entry, error)) (*Entry, error) {
+	flightMu.Lock()
+	if c, ok := flights[key]; ok {
+		flightMu.Unlock()
+		c.wg.Wait()
+		return c.val, c.err
+	}
+	c := &call{}
+	c.wg.Add(1)
+	flights[key] = c
+	flightMu.Unlock()
+
+	c.val, c.err = fn()
+
+	flightMu.Lock()
+	delete(flights, key)
+	flightMu.Unlock()
+	c.wg.Done()
+
+	return c.val, c.err
+}
+
 type Entry struct {
 	Key          string
 	Value        []byte

@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 const (
@@ -35,19 +36,40 @@ type Config struct {
 	RequestTimeout int // 上游请求超时(秒)
 }
 
-var cfg = Config{
-	ListenAddr:     ":8080",
-	DBPath:         "./data/fci.db",
-	WebDir:         "./web/dist",
-	JWTSecret:      "",
-	AdminUser:      "root",
-	CacheEnabled:   true,
-	CacheMaxItems:  10000,
-	RequestTimeout: 300,
+var (
+	cfgMu sync.RWMutex
+	cfg = Config{
+		ListenAddr:     ":8080",
+		DBPath:         "./data/fci.db",
+		WebDir:         "./web/dist",
+		JWTSecret:      "",
+		AdminUser:      "root",
+		CacheEnabled:   true,
+		CacheMaxItems:  10000,
+		RequestTimeout: 300,
+	}
+)
+
+// Get 返回全局配置的副本(防止外部篡改全局状态)
+func Get() Config {
+	cfgMu.RLock()
+	defer cfgMu.RUnlock()
+	return cfg
 }
 
-// Get 返回全局配置
-func Get() *Config { return &cfg }
+// ClearInitAdminPass 清零内存中的明文管理员密码(初始化完成后调用)
+func ClearInitAdminPass() {
+	cfgMu.Lock()
+	defer cfgMu.Unlock()
+	cfg.InitAdminPass = ""
+}
+
+// SetWebDirForTest 仅用于测试: 覆盖前端静态资源目录
+func SetWebDirForTest(dir string) {
+	cfgMu.Lock()
+	defer cfgMu.Unlock()
+	cfg.WebDir = dir
+}
 
 // Load 从环境变量加载配置
 func Load() {
