@@ -30,7 +30,7 @@ func setupTestServer(t *testing.T) *gin.Engine {
 	db.Exec("DELETE FROM users")
 	model.DB = db
 	cache.Init()
-	config.Get().WebDir = "" // 强制使用嵌入前端
+	config.SetWebDirForTest("") // 强制使用嵌入前端
 	return SetupRouter()
 }
 

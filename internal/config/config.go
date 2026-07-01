@@ -8,10 +8,15 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 )
 
-// MinPasswordLength 全项目统一的密码最小长度(Setup / ChangePassword / initAdminFromEnv 共用)
-const MinPasswordLength = 6
+const (
+	// MinPasswordLength 全项目统一的密码最小长度(Setup / ChangePassword / initAdminFromEnv 共用)
+	MinPasswordLength = 6
+	defaultCacheMaxItems  = 10000
+	defaultRequestTimeout = 300
+)
 
 // MaxPasswordLength 全项目统一的密码最大长度.
 // bcrypt 会对超过 72 字节的密码静默截断只取前 72 字节, 两个前 72 位相同的长密码哈希一致,
@@ -31,19 +36,40 @@ type Config struct {
 	RequestTimeout int // 上游请求超时(秒)
 }
 
-var cfg = Config{
-	ListenAddr:     ":8080",
-	DBPath:         "./data/fci.db",
-	WebDir:         "./web/dist",
-	JWTSecret:      "",
-	AdminUser:      "root",
-	CacheEnabled:   true,
-	CacheMaxItems:  10000,
-	RequestTimeout: 300,
+var (
+	cfgMu sync.RWMutex
+	cfg = Config{
+		ListenAddr:     ":8080",
+		DBPath:         "./data/fci.db",
+		WebDir:         "./web/dist",
+		JWTSecret:      "",
+		AdminUser:      "root",
+		CacheEnabled:   true,
+		CacheMaxItems:  10000,
+		RequestTimeout: 300,
+	}
+)
+
+// Get 返回全局配置的副本(防止外部篡改全局状态)
+func Get() Config {
+	cfgMu.RLock()
+	defer cfgMu.RUnlock()
+	return cfg
 }
 
-// Get 返回全局配置
-func Get() *Config { return &cfg }
+// ClearInitAdminPass 清零内存中的明文管理员密码(初始化完成后调用)
+func ClearInitAdminPass() {
+	cfgMu.Lock()
+	defer cfgMu.Unlock()
+	cfg.InitAdminPass = ""
+}
+
+// SetWebDirForTest 仅用于测试: 覆盖前端静态资源目录
+func SetWebDirForTest(dir string) {
+	cfgMu.Lock()
+	defer cfgMu.Unlock()
+	cfg.WebDir = dir
+}
 
 // Load 从环境变量加载配置
 func Load() {
@@ -68,16 +94,28 @@ func Load() {
 		cfg.InitAdminPass = v
 	}
 	if v := os.Getenv("FCI_CACHE_ENABLED"); v != "" {
-		cfg.CacheEnabled = strings.EqualFold(v, "true") || v == "1"
+		vLower := strings.ToLower(v)
+		switch vLower {
+		case "true", "1", "yes", "on":
+			cfg.CacheEnabled = true
+		case "false", "0", "no", "off":
+			cfg.CacheEnabled = false
+		default:
+			log.Printf("[fci] 警告: FCI_CACHE_ENABLED=%s 无法识别，使用默认值 true", v)
+		}
 	}
 	if v := os.Getenv("FCI_CACHE_MAX"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.CacheMaxItems = n
+		} else {
+			log.Printf("[fci] 警告: FCI_CACHE_MAX=%s 无效，使用默认值 %d", v, defaultCacheMaxItems)
 		}
 	}
 	if v := os.Getenv("FCI_REQUEST_TIMEOUT"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.RequestTimeout = n
+		} else {
+			log.Printf("[fci] 警告: FCI_REQUEST_TIMEOUT=%s 无效，使用默认值 %d", v, defaultRequestTimeout)
 		}
 	}
 	// 安全: 若未配置 JWT 密钥, 用 crypto/rand 生成随机密钥并警告(每次重启会变化, 导致旧 token 失效)

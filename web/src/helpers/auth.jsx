@@ -1,85 +1,115 @@
-import React, { createContext, useContext, useEffect, useState } from 'react'
+import React, { createContext, useContext, useEffect, useRef, useState } from 'react'
 import { Navigate, useLocation } from 'react-router-dom'
 import * as api from './api'
 
 const AuthContext = createContext(null)
 
-// 提供 token、username、role，以及 login/logout 方法
+// 认证上下文：基于HttpOnly Cookie，token不再存在前端
 export function AuthProvider({ children }) {
-  const [token, setToken] = useState(() => localStorage.getItem('fci_token'))
-  const [username, setUsername] = useState(
-    () => localStorage.getItem('fci_username') || '',
-  )
-  const [role, setRole] = useState(() => localStorage.getItem('fci_role') || '')
+  const [username, setUsername] = useState('')
+  const [role, setRole] = useState('')
   const [user, setUser] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [isAuthenticated, setIsAuthenticated] = useState(false)
+  const mountedRef = useRef(true)
 
-  // 登录：保存 token、用户名、角色
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
+
+  // 登录成功后更新前端状态(Cookie已由服务端Set-Cookie设置)
   function handleLogin(data) {
-    const { token: t, username: u, role: r } = data
-    localStorage.setItem('fci_token', t)
+    const { username: u, role: r } = data
     localStorage.setItem('fci_username', u)
-    if (r) localStorage.setItem('fci_role', r)
-    setToken(t)
+    if (r) {
+      localStorage.setItem('fci_role', r)
+    } else {
+      localStorage.removeItem('fci_role')
+    }
     setUsername(u)
     setRole(r || '')
+    setIsAuthenticated(true)
+    setUser({ id: data.id, username: u, role: r })
   }
 
-  // 登出：清空本地存储与状态
-  function logout() {
-    localStorage.removeItem('fci_token')
+  // 登出：调用服务端清除Cookie，清空本地状态
+  async function handleLogout() {
+    try {
+      await api.logout()
+    } catch (e) {
+      // 忽略网络错误，本地状态仍需清空
+    }
     localStorage.removeItem('fci_username')
     localStorage.removeItem('fci_role')
-    setToken(null)
-    setUsername('')
-    setRole('')
-    setUser(null)
+    if (mountedRef.current) {
+      setUsername('')
+      setRole('')
+      setUser(null)
+      setIsAuthenticated(false)
+    }
   }
 
-  // 拉取当前用户信息（用于刷新页面后恢复 role）
+  // 拉取当前用户信息(页面加载时用于恢复登录态)
   async function refreshUser() {
-    if (!token) return null
     try {
       const res = await api.getUser()
-      if (res?.success) {
+      if (!mountedRef.current) return null
+      if (res?.success && res.data) {
         setUser(res.data)
-        if (res.data?.role) {
-          setRole(res.data.role)
+        setUsername(res.data.username || '')
+        setRole(res.data.role || '')
+        setIsAuthenticated(true)
+        if (res.data.username) {
+          localStorage.setItem('fci_username', res.data.username)
+        }
+        if (res.data.role) {
           localStorage.setItem('fci_role', res.data.role)
         }
         return res.data
       }
     } catch (e) {
-      // token 失效则登出
+      if (!mountedRef.current) return null
+      // 401说明Cookie无效/过期，清空登录态
       if (e?.response?.status === 401) {
-        logout()
+        localStorage.removeItem('fci_username')
+        localStorage.removeItem('fci_role')
+        setUsername('')
+        setRole('')
+        setUser(null)
+        setIsAuthenticated(false)
+      }
+    } finally {
+      if (mountedRef.current) {
+        setLoading(false)
       }
     }
     return null
   }
 
+  // 页面加载时尝试通过Cookie恢复登录态
   useEffect(() => {
-    if (token) {
-      refreshUser()
-    }
+    refreshUser()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token])
+  }, [])
 
   const value = {
-    token,
     username,
     role,
     user,
+    loading,
     login: handleLogin,
-    logout,
+    logout: handleLogout,
     refreshUser,
-    isAuthenticated: !!token,
+    isAuthenticated,
     isAdmin: role === 'admin',
   }
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
 }
 
-// 获取鉴权上下文
 export function useAuth() {
   const ctx = useContext(AuthContext)
   if (!ctx) {
@@ -88,19 +118,25 @@ export function useAuth() {
   return ctx
 }
 
-// 受保护路由：无 token 跳登录
+// 受保护路由：加载中显示空白，未登录跳登录页
 export function ProtectedRoute({ children }) {
-  const { isAuthenticated } = useAuth()
+  const { isAuthenticated, loading } = useAuth()
   const location = useLocation()
+  if (loading) {
+    return null
+  }
   if (!isAuthenticated) {
     return <Navigate to="/login" replace state={{ from: location }} />
   }
   return children
 }
 
-// 管理员路由：非 admin 跳控制台
+// 管理员路由：非admin跳控制台
 export function AdminRoute({ children }) {
-  const { isAdmin } = useAuth()
+  const { isAdmin, loading } = useAuth()
+  if (loading) {
+    return null
+  }
   if (!isAdmin) {
     return <Navigate to="/console" replace />
   }

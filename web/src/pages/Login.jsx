@@ -18,20 +18,25 @@ export default function Login() {
   const presetUsername = location.state?.username || ''
 
   useEffect(() => {
+    let active = true
     if (isAuthenticated) {
       navigate('/console', { replace: true })
-      return
+      active = false
+    } else {
+      // 检查是否需要首次设置管理员
+      getStatus()
+        .then((res) => {
+          if (active && res?.success && res?.data?.need_setup) {
+            navigate('/setup', { replace: true })
+          }
+        })
+        .catch(() => {
+          // 忽略: 即使状态检查失败也允许走登录流程
+        })
     }
-    // 检查是否需要首次设置管理员
-    getStatus()
-      .then((res) => {
-        if (res?.success && res?.data?.need_setup) {
-          navigate('/setup', { replace: true })
-        }
-      })
-      .catch(() => {
-        // 忽略: 即使状态检查失败也允许走登录流程
-      })
+    return () => {
+      active = false
+    }
   }, [isAuthenticated, navigate])
 
   async function handleSubmit(values) {
@@ -39,7 +44,7 @@ export default function Login() {
     setLoading(true)
     try {
       const res = await login(values)
-      if (res?.success && res?.data?.token) {
+      if (res?.success) {
         doLogin(res.data)
         navigate('/console', { replace: true })
       } else {

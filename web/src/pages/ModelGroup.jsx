@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Table,
   Tag,
@@ -72,8 +72,21 @@ export default function ModelGroup() {
   const [formValues, setFormValues] = useState(DEFAULT_FORM)
   // 手动管理图片模型数组（与 Form 同步）
   const [imageModels, setImageModels] = useState([defaultUpstream()])
+  const [imageModelsErrors, setImageModelsErrors] = useState({})
+  const [togglingId, setTogglingId] = useState(null)
+  const refreshReqIdRef = useRef(0)
+  const editReqIdRef = useRef(0)
+  const mountedRef = useRef(true)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
 
   async function refresh() {
+    const myId = ++refreshReqIdRef.current
     setLoading(true)
     try {
       const res = await listGroups({
@@ -81,14 +94,18 @@ export default function ModelGroup() {
         size,
         keyword: keyword || undefined,
       })
+      if (myId !== refreshReqIdRef.current || !mountedRef.current) return
       if (res?.success) {
         setData(res.data || [])
         setTotal(res.total || 0)
       }
     } catch (e) {
+      if (myId !== refreshReqIdRef.current || !mountedRef.current) return
       Toast.error(pickMessage(e, '加载模型组列表失败'))
     } finally {
-      setLoading(false)
+      if (myId === refreshReqIdRef.current && mountedRef.current) {
+        setLoading(false)
+      }
     }
   }
 
@@ -111,16 +128,19 @@ export default function ModelGroup() {
     setEditingId(null)
     setFormValues(DEFAULT_FORM)
     setImageModels([defaultUpstream()])
+    setImageModelsErrors({})
     setModalVisible(true)
   }
 
   // 打开编辑 Modal：先拉详情获取明文 api_key
   async function openEdit(row) {
+    const myId = ++editReqIdRef.current
     setEditingId(row.id)
     setModalVisible(true)
     setModalLoading(true)
     try {
       const res = await getGroupPlain(row.id)
+      if (myId !== editReqIdRef.current || !mountedRef.current) return
       if (res?.success && res.data) {
         const g = res.data
         const main = {
@@ -157,22 +177,29 @@ export default function ModelGroup() {
         }
         setFormValues(vals)
         setImageModels(vals.image_models)
+        setImageModelsErrors({})
       } else {
         Toast.error(res?.message || '加载详情失败')
         setModalVisible(false)
       }
     } catch (e) {
+      if (myId !== editReqIdRef.current || !mountedRef.current) return
       Toast.error(pickMessage(e, '加载详情失败'))
       setModalVisible(false)
     } finally {
-      setModalLoading(false)
+      if (myId === editReqIdRef.current && mountedRef.current) {
+        setModalLoading(false)
+      }
     }
   }
 
   // 切换启用状态：直接调 toggle
   async function handleToggle(row) {
+    if (togglingId) return
+    setTogglingId(row.id)
     try {
       const res = await toggleGroup(row.id)
+      if (!mountedRef.current) return
       if (res?.success) {
         Toast.success(res.data?.enabled ? '已启用' : '已停用')
         refresh()
@@ -180,7 +207,12 @@ export default function ModelGroup() {
         Toast.error(res?.message || '切换失败')
       }
     } catch (e) {
+      if (!mountedRef.current) return
       Toast.error(pickMessage(e, '切换失败'))
+    } finally {
+      if (mountedRef.current) {
+        setTogglingId(null)
+      }
     }
   }
 
@@ -222,10 +254,36 @@ export default function ModelGroup() {
     setImageModels((prev) =>
       prev.map((m, i) => (i === idx ? { ...m, [key]: value } : m)),
     )
+    setImageModelsErrors((prev) => {
+      if (!prev[idx]) return prev
+      const newErrs = { ...prev }
+      const idxErrs = { ...newErrs[idx] }
+      delete idxErrs[key]
+      if (Object.keys(idxErrs).length === 0) {
+        delete newErrs[idx]
+      } else {
+        newErrs[idx] = idxErrs
+      }
+      return newErrs
+    })
   }
 
   // 提交表单
   async function handleSubmit(values) {
+    const errors = {}
+    imageModels.forEach((m, idx) => {
+      const errs = {}
+      if (!m.base_url) errs.base_url = true
+      if (!m.api_key) errs.api_key = true
+      if (!m.model) errs.model = true
+      if (Object.keys(errs).length) errors[idx] = errs
+    })
+    setImageModelsErrors(errors)
+    if (Object.keys(errors).length) {
+      Toast.error('请填写图片模型的必填字段')
+      return
+    }
+
     const payload = {
       name: values.name,
       description: values.description || '',
@@ -257,6 +315,10 @@ export default function ModelGroup() {
       Toast.error('请填写名称')
       return
     }
+    if (!payload.main_text_model.base_url || !payload.main_text_model.api_key || !payload.main_text_model.model) {
+      Toast.error('请填写主对话模型的必填字段')
+      return
+    }
     if (!payload.image_models.length) {
       Toast.error('至少需要 1 个图片模型')
       return
@@ -270,6 +332,7 @@ export default function ModelGroup() {
       } else {
         res = await createGroup(payload)
       }
+      if (!mountedRef.current) return
       if (res?.success) {
         Toast.success(editingId ? '已更新' : '已创建')
         setModalVisible(false)
@@ -278,9 +341,12 @@ export default function ModelGroup() {
         Toast.error(res?.message || '保存失败')
       }
     } catch (e) {
+      if (!mountedRef.current) return
       Toast.error(pickMessage(e, '保存失败'))
     } finally {
-      setModalLoading(false)
+      if (mountedRef.current) {
+        setModalLoading(false)
+      }
     }
   }
 
@@ -340,7 +406,8 @@ export default function ModelGroup() {
           <Switch
             checked={!!v}
             onChange={() => handleToggle(row)}
-            disabled={!isAdmin}
+            disabled={!isAdmin || togglingId === row.id}
+            loading={togglingId === row.id}
           />
         ),
       },
@@ -390,7 +457,7 @@ export default function ModelGroup() {
       },
     ],
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [isAdmin],
+    [isAdmin, togglingId],
   )
 
   // 把 formValues 展平为 Semi Form 的 initValues（点号字段）
@@ -532,17 +599,20 @@ export default function ModelGroup() {
                 field="main_text_model.base_url"
                 label="Base URL"
                 placeholder="https://api.openai.com/v1"
+                rules={[{ required: true, message: '请输入 Base URL' }]}
               />
               <Form.Input
                 field="main_text_model.api_key"
                 label="API Key"
                 placeholder="sk-..."
                 mode="password"
+                rules={[{ required: true, message: '请输入 API Key' }]}
               />
               <Form.Input
                 field="main_text_model.model"
                 label="模型"
                 placeholder="如 gpt-4o"
+                rules={[{ required: true, message: '请输入模型名' }]}
               />
               <Form.Input
                 field="main_text_model.api_type"
@@ -576,13 +646,18 @@ export default function ModelGroup() {
                   key={idx}
                   className="!rounded-2xl p-4"
                   style={{
-                    border: '1px solid var(--semi-color-border)',
+                    border: imageModelsErrors[idx] ? '1px solid var(--semi-color-danger)' : '1px solid var(--semi-color-border)',
                     background: 'var(--semi-color-bg-1)',
                   }}
                 >
                   <div className="flex items-center justify-between mb-3">
                     <span className="text-sm font-semibold">
                       图片模型 #{idx + 1}
+                      {imageModelsErrors[idx] && (
+                        <span style={{ color: 'var(--semi-color-danger)', fontSize: 12, marginLeft: 8 }}>
+                          请填写必填项
+                        </span>
+                      )}
                     </span>
                     <Button
                       size="small"
@@ -601,6 +676,7 @@ export default function ModelGroup() {
                       noLabel
                       placeholder="Base URL"
                       value={m.base_url}
+                      validateStatus={imageModelsErrors[idx]?.base_url ? 'error' : undefined}
                       onChange={(v) => updateImageModel(idx, 'base_url', v)}
                     />
                     <Form.Input
@@ -610,6 +686,7 @@ export default function ModelGroup() {
                       placeholder="API Key"
                       mode="password"
                       value={m.api_key}
+                      validateStatus={imageModelsErrors[idx]?.api_key ? 'error' : undefined}
                       onChange={(v) => updateImageModel(idx, 'api_key', v)}
                     />
                     <Form.Input
@@ -618,6 +695,7 @@ export default function ModelGroup() {
                       noLabel
                       placeholder="模型，如 gpt-image-1"
                       value={m.model}
+                      validateStatus={imageModelsErrors[idx]?.model ? 'error' : undefined}
                       onChange={(v) => updateImageModel(idx, 'model', v)}
                     />
                     <Form.Input

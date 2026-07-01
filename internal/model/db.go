@@ -51,6 +51,8 @@ func initAdminFromEnv() error {
 	if cfg.InitAdminPass == "" {
 		return nil
 	}
+	// 创建完成后(无论成功失败)清零内存中的明文密码引用, 减少常驻内存暴露面
+	defer config.ClearInitAdminPass()
 	// 与 Setup / ChangePassword 保持一致的密码强度校验, 避免环境变量误设弱密码
 	if err := config.ValidatePasswordStrength(cfg.InitAdminPass); err != nil {
 		return fmt.Errorf("FCI_ADMIN_PASS %w", err)
@@ -62,8 +64,11 @@ func initAdminFromEnv() error {
 		return fmt.Errorf("FCI_ADMIN_USER 不能为空")
 	}
 	var count int64
-	DB.Model(&User{}).Count(&count)
+	if err := DB.Model(&User{}).Count(&count).Error; err != nil {
+		return fmt.Errorf("查询用户数量失败: %w", err)
+	}
 	if count > 0 {
+		log.Printf("[fci] 已存在 %d 个用户, 跳过环境变量管理员创建", count)
 		return nil
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(cfg.InitAdminPass), bcrypt.DefaultCost)
@@ -77,7 +82,7 @@ func initAdminFromEnv() error {
 		Status:       1,
 	}
 	if err := DB.Create(&u).Error; err != nil {
-		// Low-9: 唯一约束冲突不应阻断启动(并发初始化/旧数据残留都可能触发).
+		// 唯一约束冲突不应阻断启动(并发初始化/旧数据残留都可能触发).
 		// 与 SetupAdmin 一致地视为"已存在, 跳过"而非致命错误
 		if errors.Is(err, gorm.ErrDuplicatedKey) || isUniqueConstraintErr(err) {
 			log.Printf("[fci] 管理员账户 %s 已存在, 跳过创建", adminUser)
@@ -86,16 +91,16 @@ func initAdminFromEnv() error {
 		return err
 	}
 	log.Printf("[fci] 已通过环境变量创建管理员账户: %s", adminUser)
-	// Low-6: 创建完成后清零内存中的明文密码引用, 减少常驻内存暴露面
-	// (Go 字符串不可变无法真正擦除底层字节, 但消除 cfg.InitAdminPass 这一稳定引用)
-	cfg.InitAdminPass = ""
 	return nil
 }
 
 // IsSetupRequired 判断是否需要进行首次管理员设置(没有任何用户时返回 true)
 func IsSetupRequired() bool {
 	var count int64
-	DB.Model(&User{}).Count(&count)
+	if err := DB.Model(&User{}).Count(&count).Error; err != nil {
+		log.Printf("[fci] IsSetupRequired 查询失败: %v", err)
+		return false
+	}
 	return count == 0
 }
 
@@ -154,11 +159,44 @@ func VerifyPassword(username, password string) (*User, bool) {
 	return &u, true
 }
 
-// UpdatePassword 更新密码
+// VerifyPasswordByID 通过用户ID校验密码
+func VerifyPasswordByID(userID uint, password string) (*User, bool) {
+	var u User
+	if err := DB.Where("id = ? AND status = 1", userID).First(&u).Error; err != nil {
+		return nil, false
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(password)); err != nil {
+		return nil, false
+	}
+	return &u, true
+}
+
+// UpdatePassword 更新密码并递增token_version, 立即使所有旧JWT失效
 func UpdatePassword(userID uint, newPlain string) error {
 	hash, err := bcrypt.GenerateFromPassword([]byte(newPlain), bcrypt.DefaultCost)
 	if err != nil {
 		return err
 	}
-	return DB.Model(&User{}).Where("id = ?", userID).Update("password_hash", string(hash)).Error
+	return DB.Model(&User{}).Where("id = ?", userID).Updates(map[string]interface{}{
+		"password_hash": string(hash),
+		"token_version": gorm.Expr("token_version + 1"),
+	}).Error
+}
+
+// GetUserTokenVersion 获取用户当前token版本
+func GetUserTokenVersion(userID uint) (int, error) {
+	var u User
+	if err := DB.Select("token_version").First(&u, userID).Error; err != nil {
+		return 0, err
+	}
+	return u.TokenVersion, nil
+}
+
+// GetUserByID 根据ID获取用户
+func GetUserByID(userID uint) (*User, error) {
+	var u User
+	if err := DB.First(&u, userID).Error; err != nil {
+		return nil, err
+	}
+	return &u, nil
 }

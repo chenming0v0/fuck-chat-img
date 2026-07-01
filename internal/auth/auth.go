@@ -20,13 +20,19 @@ const (
 	ContextKeyUsername = "username"
 	ContextKeyRole     = "role"
 	ContextKeyAdmin    = "is_admin"
+	// CookieName JWT存储的HttpOnly Cookie名称
+	CookieName = "fci_token"
+	// ProxyUserID 代理密钥认证请求使用的固定用户ID(非零, 确保历史记录归属可追溯).
+	// 使用 MaxUint 避免与正常自增用户ID冲突.
+	ProxyUserID uint = ^uint(0)
 )
 
 // Claims JWT 载荷
 type Claims struct {
-	UserID   uint   `json:"uid"`
-	Username string `json:"usr"`
-	Role     string `json:"rol"`
+	UserID       uint   `json:"uid"`
+	Username     string `json:"usr"`
+	Role         string `json:"rol"`
+	TokenVersion int    `json:"tv"`
 	jwt.RegisteredClaims
 }
 
@@ -36,9 +42,10 @@ func GenerateToken(u *model.User) (string, time.Time, error) {
 	cfg := config.Get()
 	expiresAt := time.Now().Add(7 * 24 * time.Hour)
 	claims := Claims{
-		UserID:   u.ID,
-		Username: u.Username,
-		Role:     u.Role,
+		UserID:       u.ID,
+		Username:     u.Username,
+		Role:         u.Role,
+		TokenVersion: u.TokenVersion,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(expiresAt),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
@@ -50,7 +57,7 @@ func GenerateToken(u *model.User) (string, time.Time, error) {
 	return s, expiresAt, err
 }
 
-// ParseToken 解析 JWT
+// ParseToken 解析 JWT(仅做签名和过期校验, token_version 校验由 ValidateTokenVersion 负责)
 func ParseToken(tokenStr string) (*Claims, error) {
 	cfg := config.Get()
 	claims := &Claims{}
@@ -67,24 +74,75 @@ func ParseToken(tokenStr string) (*Claims, error) {
 	return claims, nil
 }
 
-// extractToken 从请求中提取 token (Authorization: Bearer xxx 或 query token)
-// 注意: query token 仅用于代理接口(SSE/EventSource 无法自定义 Header 场景),
-// Web UI 鉴权(MiddlewareAuth)不允许 query token, 避免长期 JWT 泄露到访问日志.
-// HTTP/1.1 规范中 Authorization scheme 大小写不敏感, 部分客户端发 bearer/BEARER, 需兼容(Low-12).
+// ValidateTokenVersion 校验JWT中的token_version是否与数据库中用户当前版本一致
+// 修改密码时会递增token_version, 使所有旧JWT立即失效
+func ValidateTokenVersion(claims *Claims) bool {
+	// ProxyKey认证的请求不经过JWT, 不会调用此函数
+	// ProxyUserID是特殊ID, 跳过版本校验(它不用JWT)
+	if claims.UserID == ProxyUserID {
+		return true
+	}
+	currentVersion, err := model.GetUserTokenVersion(claims.UserID)
+	if err != nil {
+		return false
+	}
+	return currentVersion == claims.TokenVersion
+}
+
+// SetAuthCookie 设置HttpOnly认证Cookie(JWT存储), 防止XSS窃取token
+func SetAuthCookie(c *gin.Context, token string, expiresAt time.Time) {
+	cookie := &http.Cookie{
+		Name:     CookieName,
+		Value:    token,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Expires:  expiresAt,
+		MaxAge:   int(time.Until(expiresAt).Seconds()),
+	}
+	http.SetCookie(c.Writer, cookie)
+}
+
+// ClearAuthCookie 清除认证Cookie(登出时调用)
+func ClearAuthCookie(c *gin.Context) {
+	cookie := &http.Cookie{
+		Name:     CookieName,
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   -1,
+		Expires:  time.Unix(0, 0),
+	}
+	http.SetCookie(c.Writer, cookie)
+}
+
+// extractToken 从请求中提取 token (优先Cookie, 其次Authorization: Bearer header, 最后query token)
+// query token 仅用于代理接口(SSE/EventSource 无法自定义 Header 场景).
+// HTTP/1.1 规范中 Authorization scheme 大小写不敏感, 部分客户端发 bearer/BEARER, 需兼容.
 func extractToken(c *gin.Context) string {
+	// 1. 优先从HttpOnly Cookie读取(Web UI主要方式, 防XSS)
+	if cookie, err := c.Cookie(CookieName); err == nil && cookie != "" {
+		return cookie
+	}
+	// 2. 其次从Authorization header读取(API客户端/programmatic access)
 	if h := c.GetHeader("Authorization"); h != "" {
 		if t, ok := extractBearer(h); ok {
 			return t
 		}
 	}
+	// 3. 最后从query读取(仅用于SSE/EventSource)
 	if t := c.Query("token"); t != "" {
 		return t
 	}
 	return ""
 }
 
-// extractTokenHeaderOnly 仅从 Header 提取 token(用于 Web UI 鉴权, 避免 JWT 进日志)
-func extractTokenHeaderOnly(c *gin.Context) string {
+// extractTokenNoQuery 从Cookie或Header提取token, 不允许query参数(Web UI鉴权用)
+func extractTokenNoQuery(c *gin.Context) string {
+	if cookie, err := c.Cookie(CookieName); err == nil && cookie != "" {
+		return cookie
+	}
 	if h := c.GetHeader("Authorization"); h != "" {
 		if t, ok := extractBearer(h); ok {
 			return t
@@ -120,14 +178,20 @@ func extractProxyKey(c *gin.Context) string {
 // MiddlewareAuth 要求登录(用于 Web UI 控制台)
 func MiddlewareAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		token := extractTokenHeaderOnly(c)
+		token := extractTokenNoQuery(c)
 		if token == "" {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"success": false, "message": "未登录"})
 			return
 		}
 		claims, err := ParseToken(token)
 		if err != nil {
+			ClearAuthCookie(c)
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"success": false, "message": "登录已过期"})
+			return
+		}
+		if !ValidateTokenVersion(claims) {
+			ClearAuthCookie(c)
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"success": false, "message": "登录已失效，请重新登录"})
 			return
 		}
 		c.Set(ContextKeyUserID, claims.UserID)
@@ -141,8 +205,9 @@ func MiddlewareAuth() gin.HandlerFunc {
 // MiddlewareAdmin 要求管理员
 func MiddlewareAdmin() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		isAdmin, _ := c.Get(ContextKeyAdmin)
-		if isAdmin != true {
+		v, exists := c.Get(ContextKeyAdmin)
+		isAdmin, ok := v.(bool)
+		if !exists || !ok || !isAdmin {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"success": false, "message": "需要管理员权限"})
 			return
 		}
@@ -162,6 +227,12 @@ func MiddlewareProxyAuth() gin.HandlerFunc {
 		// 1. 先尝试解析为 Web UI 的 JWT(query 或 header 均可, JWT 短效)
 		if token != "" {
 			if claims, err := ParseToken(token); err == nil {
+				if !ValidateTokenVersion(claims) {
+					c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+						"error": gin.H{"message": "token revoked", "type": "auth_error", "code": 401},
+					})
+					return
+				}
 				isAdmin := claims.Role == "admin"
 				// 未配置 proxy key 时, 仅管理员 JWT 放行(H6: 此前任意有效 JWT 都放行, 违反文档承诺)
 				if !isAdmin && proxyKey == "" {
@@ -181,6 +252,9 @@ func MiddlewareProxyAuth() gin.HandlerFunc {
 		// 2. 校验代理访问密钥(常量时间比较, 防时序侧信道; 仅从 Header 取, 避免 query 泄漏)
 		if proxyKey != "" {
 			if pk := extractProxyKey(c); pk != "" && subtle.ConstantTimeCompare([]byte(pk), []byte(proxyKey)) == 1 {
+				c.Set(ContextKeyUserID, ProxyUserID)
+				c.Set(ContextKeyUsername, "__proxy__")
+				c.Set(ContextKeyRole, "proxy")
 				c.Set(ContextKeyAdmin, false)
 				c.Next()
 				return

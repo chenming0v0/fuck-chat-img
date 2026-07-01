@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Table,
   Tag,
@@ -44,9 +44,21 @@ export default function History() {
   const [detailOpen, setDetailOpen] = useState(false)
   const [detail, setDetail] = useState(null)
   const [detailLoading, setDetailLoading] = useState(false)
+  const refreshReqIdRef = useRef(0)
+  const statsReqIdRef = useRef(0)
+  const detailReqIdRef = useRef(0)
+  const mountedRef = useRef(true)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
 
   // 刷新列表与统计
   async function refresh() {
+    const myId = ++refreshReqIdRef.current
     setLoading(true)
     try {
       const params = {
@@ -64,20 +76,26 @@ export default function History() {
               : 'false',
       }
       const res = await listHistory(params)
+      if (myId !== refreshReqIdRef.current || !mountedRef.current) return
       if (res?.success) {
         setData(res.data || [])
         setTotal(res.total || 0)
       }
     } catch (e) {
+      if (myId !== refreshReqIdRef.current || !mountedRef.current) return
       Toast.error(pickMessage(e, '加载历史记录失败'))
     } finally {
-      setLoading(false)
+      if (myId === refreshReqIdRef.current && mountedRef.current) {
+        setLoading(false)
+      }
     }
   }
 
   async function refreshStats() {
+    const myId = ++statsReqIdRef.current
     try {
       const res = await historyStats()
+      if (myId !== statsReqIdRef.current || !mountedRef.current) return
       if (res?.success) setStats(res.data)
     } catch (e) {
       // 统计失败不阻断主列表
@@ -103,11 +121,13 @@ export default function History() {
   }, [])
 
   async function openDetail(row) {
+    const myId = ++detailReqIdRef.current
     setDetailOpen(true)
     setDetailLoading(true)
     setDetail(null)
     try {
       const res = await getHistory(row.id)
+      if (myId !== detailReqIdRef.current || !mountedRef.current) return
       if (res?.success) {
         setDetail(res.data)
       } else {
@@ -115,9 +135,12 @@ export default function History() {
         setDetail(row)
       }
     } catch (e) {
+      if (myId !== detailReqIdRef.current || !mountedRef.current) return
       setDetail(row)
     } finally {
-      setDetailLoading(false)
+      if (myId === detailReqIdRef.current && mountedRef.current) {
+        setDetailLoading(false)
+      }
     }
   }
 

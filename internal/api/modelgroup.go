@@ -9,6 +9,7 @@ import (
 	"github.com/fuck-chat-img/fci/internal/model"
 	"github.com/fuck-chat-img/fci/internal/proxy"
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 // ListGroups 列出模型组
@@ -23,16 +24,26 @@ func ListGroups(c *gin.Context) {
 	}
 	keyword := strings.TrimSpace(c.Query("keyword"))
 
-	var total int64
-	q := model.DB.Model(&model.ModelGroup{})
-	if keyword != "" {
-		q = q.Where("name LIKE ? OR description LIKE ?", "%"+keyword+"%", "%"+keyword+"%")
+	applyFilters := func(q *gorm.DB) *gorm.DB {
+		if keyword != "" {
+			escaped := escapeLike(keyword)
+			q = q.Where("name LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\'", "%"+escaped+"%", "%"+escaped+"%")
+		}
+		return q
 	}
-	q.Count(&total)
-	var groups []model.ModelGroup
-	q.Order("id DESC").Offset((page - 1) * size).Limit(size).Find(&groups)
 
-	// 脱敏 api_key
+	var total int64
+	if err := applyFilters(model.DB.Session(&gorm.Session{}).Model(&model.ModelGroup{})).Count(&total).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": err.Error()})
+		return
+	}
+	var groups []model.ModelGroup
+	if err := applyFilters(model.DB.Session(&gorm.Session{}).Model(&model.ModelGroup{})).
+		Order("id DESC").Offset((page - 1) * size).Limit(size).Find(&groups).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": err.Error()})
+		return
+	}
+
 	out := make([]gin.H, 0, len(groups))
 	for _, g := range groups {
 		out = append(out, groupToDTO(g, true))
@@ -46,9 +57,13 @@ func ListGroups(c *gin.Context) {
 	})
 }
 
-// GetGroup 获取单个(始终脱敏 API Key, 编辑时通过 GetGroupPlain 获取明文)
+// GetGroup 获取单个
 func GetGroup(c *gin.Context) {
-	id, _ := strconv.Atoi(c.Param("id"))
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id < 1 {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "非法 id"})
+		return
+	}
 	var g model.ModelGroup
 	if err := model.DB.First(&g, id).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"success": false, "message": "模型组不存在"})
@@ -57,9 +72,13 @@ func GetGroup(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": groupToDTO(g, true)})
 }
 
-// GetGroupPlain 获取单个(明文 API Key, 仅管理员可用, 用于编辑表单回填)
+// GetGroupPlain 获取单个
 func GetGroupPlain(c *gin.Context) {
-	id, _ := strconv.Atoi(c.Param("id"))
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id < 1 {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "非法 id"})
+		return
+	}
 	var g model.ModelGroup
 	if err := model.DB.First(&g, id).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"success": false, "message": "模型组不存在"})
@@ -79,8 +98,16 @@ func CreateGroup(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
 		return
 	}
-	mainJSON, _ := json.Marshal(req.MainTextModel)
-	imgJSON, _ := json.Marshal(req.ImageModels)
+	mainJSON, err := json.Marshal(req.MainTextModel)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "序列化失败: " + err.Error()})
+		return
+	}
+	imgJSON, err := json.Marshal(req.ImageModels)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "序列化失败: " + err.Error()})
+		return
+	}
 	g := model.ModelGroup{
 		Name:          req.Name,
 		Description:   req.Description,
@@ -100,7 +127,11 @@ func CreateGroup(c *gin.Context) {
 
 // UpdateGroup 更新
 func UpdateGroup(c *gin.Context) {
-	id, _ := strconv.Atoi(c.Param("id"))
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id < 1 {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "非法 id"})
+		return
+	}
 	var g model.ModelGroup
 	if err := model.DB.First(&g, id).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"success": false, "message": "模型组不存在"})
@@ -115,8 +146,16 @@ func UpdateGroup(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
 		return
 	}
-	mainJSON, _ := json.Marshal(req.MainTextModel)
-	imgJSON, _ := json.Marshal(req.ImageModels)
+	mainJSON, err := json.Marshal(req.MainTextModel)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "序列化失败: " + err.Error()})
+		return
+	}
+	imgJSON, err := json.Marshal(req.ImageModels)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "序列化失败: " + err.Error()})
+		return
+	}
 	g.Name = req.Name
 	g.Description = req.Description
 	g.MainTextModel = string(mainJSON)
@@ -134,27 +173,31 @@ func UpdateGroup(c *gin.Context) {
 
 // DeleteGroup 删除
 func DeleteGroup(c *gin.Context) {
-	id, _ := strconv.Atoi(c.Param("id"))
-	// 先查出名称, 用于清理轮询游标
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id < 1 {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "非法 id"})
+		return
+	}
 	var g model.ModelGroup
 	if err := model.DB.First(&g, id).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"success": false, "message": "模型组不存在"})
 		return
 	}
 	if err := model.DB.Delete(&model.ModelGroup{}, id).Error; err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": err.Error()})
 		return
 	}
-	// 精确清理该模型组的轮询游标, 防止内存泄漏.
-	// 注意: 不能用 CleanupRRIndex({g.Name:false}) —— 该函数语义是"传入活跃集合(true), 集合外的删除",
-	// 传 {name:false} 会导致所有其它模型组的游标也被清空(H3 bug). 改用 DeleteRRIndex 精确删除单条.
 	proxy.DeleteRRIndex(g.Name)
 	c.JSON(http.StatusOK, gin.H{"success": true, "message": "已删除"})
 }
 
 // ToggleGroup 启用/禁用
 func ToggleGroup(c *gin.Context) {
-	id, _ := strconv.Atoi(c.Param("id"))
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id < 1 {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "非法 id"})
+		return
+	}
 	var g model.ModelGroup
 	if err := model.DB.First(&g, id).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"success": false, "message": "模型组不存在"})
@@ -168,11 +211,13 @@ func ToggleGroup(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": gin.H{"enabled": g.Enabled}})
 }
 
-// TestGroup 测试模型组(可选: 简单 ping 主模型)
-// 安全: 返回的 group DTO 必须脱敏(mask=true), 避免泄露上游 API Key.
-// (历史问题: 此处曾返回明文 Key, 绕过了 GetGroup 的脱敏修复, 现已统一)
+// TestGroup 测试模型组
 func TestGroup(c *gin.Context) {
-	id, _ := strconv.Atoi(c.Param("id"))
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id < 1 {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "非法 id"})
+		return
+	}
 	var g model.ModelGroup
 	if err := model.DB.First(&g, id).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"success": false, "message": "模型组不存在"})
@@ -182,14 +227,34 @@ func TestGroup(c *gin.Context) {
 }
 
 type createGroupReq struct {
-	Name          string             `json:"name"`
-	Description   string             `json:"description"`
-	MainTextModel model.UpstreamModel `json:"main_text_model"`
+	Name          string               `json:"name"`
+	Description   string               `json:"description"`
+	MainTextModel model.UpstreamModel  `json:"main_text_model"`
 	ImageModels   []model.UpstreamModel `json:"image_models"`
-	ImageStrategy string             `json:"image_strategy"`
-	ImagePrompt   string             `json:"image_prompt"`
-	ReplaceImage  bool               `json:"replace_image"`
-	Enabled       bool               `json:"enabled"`
+	ImageStrategy string               `json:"image_strategy"`
+	ImagePrompt   string               `json:"image_prompt"`
+	ReplaceImage  bool                 `json:"replace_image"`
+	Enabled       bool                 `json:"enabled"`
+}
+
+func validateUpstreamModel(m *model.UpstreamModel, label string) error {
+	if m.APIType != "" {
+		valid := false
+		switch m.APIType {
+		case "openai", "azure", "anthropic":
+			valid = true
+		}
+		if !valid {
+			return errStr(label + " api_type 仅支持 openai/azure/anthropic")
+		}
+	}
+	if m.MaxRetries < 0 {
+		return errStr(label + " max_retries 不能小于 0")
+	}
+	if m.Weight <= 0 {
+		return errStr(label + " weight 必须大于 0")
+	}
+	return nil
 }
 
 func validateGroupReq(r *createGroupReq) error {
@@ -199,6 +264,9 @@ func validateGroupReq(r *createGroupReq) error {
 	}
 	if r.MainTextModel.BaseURL == "" || r.MainTextModel.APIKey == "" || r.MainTextModel.Model == "" {
 		return errStr("主对话模型需填写 base_url/api_key/model")
+	}
+	if err := validateUpstreamModel(&r.MainTextModel, "主对话模型"); err != nil {
+		return err
 	}
 	if r.ImageStrategy == "" {
 		r.ImageStrategy = "round_robin"
@@ -216,6 +284,9 @@ func validateGroupReq(r *createGroupReq) error {
 		if r.ImageModels[i].Model == "" {
 			return errStr("图片模型 model 不能为空")
 		}
+		if err := validateUpstreamModel(&r.ImageModels[i], "图片模型"); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -226,7 +297,6 @@ type validateErr struct{ msg string }
 
 func (e *validateErr) Error() string { return e.msg }
 
-// groupToDTO 转为前端 DTO, maskKey=true 时对 api_key 脱敏
 func groupToDTO(g model.ModelGroup, maskKey bool) gin.H {
 	var main model.UpstreamModel
 	_ = json.Unmarshal([]byte(g.MainTextModel), &main)
@@ -239,17 +309,17 @@ func groupToDTO(g model.ModelGroup, maskKey bool) gin.H {
 		}
 	}
 	return gin.H{
-		"id":             g.ID,
-		"name":           g.Name,
-		"description":    g.Description,
+		"id":              g.ID,
+		"name":            g.Name,
+		"description":     g.Description,
 		"main_text_model": main,
-		"image_models":   imgs,
-		"image_strategy": g.ImageStrategy,
-		"image_prompt":   g.ImagePrompt,
-		"replace_image":  g.ReplaceImage,
-		"enabled":        g.Enabled,
-		"created_at":     g.CreatedAt,
-		"updated_at":     g.UpdatedAt,
+		"image_models":    imgs,
+		"image_strategy":  g.ImageStrategy,
+		"image_prompt":    g.ImagePrompt,
+		"replace_image":   g.ReplaceImage,
+		"enabled":         g.Enabled,
+		"created_at":      g.CreatedAt,
+		"updated_at":      g.UpdatedAt,
 	}
 }
 

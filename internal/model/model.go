@@ -13,6 +13,7 @@ type User struct {
 	PasswordHash string         `gorm:"size:128;not null" json:"-"`
 	Role         string         `gorm:"size:16;default:admin" json:"role"`
 	Status       int            `gorm:"default:1" json:"status"`
+	TokenVersion int            `gorm:"default:0" json:"-"`
 	CreatedAt    time.Time      `json:"created_at"`
 	UpdatedAt    time.Time      `json:"updated_at"`
 	DeletedAt    gorm.DeletedAt `gorm:"index" json:"-"`

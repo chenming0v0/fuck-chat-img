@@ -31,6 +31,7 @@ func Login(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "生成令牌失败"})
 		return
 	}
+	auth.SetAuthCookie(c, token, expiresAt)
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
@@ -43,10 +44,24 @@ func Login(c *gin.Context) {
 	})
 }
 
+// Logout 登出(清除认证Cookie)
+func Logout(c *gin.Context) {
+	auth.ClearAuthCookie(c)
+	c.JSON(http.StatusOK, gin.H{"success": true, "message": "已登出"})
+}
+
 // UserInfo 当前用户信息
 func UserInfo(c *gin.Context) {
-	uid, _ := c.Get(auth.ContextKeyUserID)
-	username, _ := c.Get(auth.ContextKeyUsername)
+	uid, ok := c.Get(auth.ContextKeyUserID)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "未登录"})
+		return
+	}
+	username, ok := c.Get(auth.ContextKeyUsername)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "未登录"})
+		return
+	}
 	role, _ := c.Get(auth.ContextKeyRole)
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -68,19 +83,12 @@ func ChangePassword(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "参数错误"})
 		return
 	}
-	uidVal, _ := c.Get(auth.ContextKeyUserID)
-	usernameVal, _ := c.Get(auth.ContextKeyUsername)
-	uid, ok := uidVal.(uint)
+	uid, ok := currentUserID(c)
 	if !ok {
 		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "未登录"})
 		return
 	}
-	username, ok := usernameVal.(string)
-	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "未登录"})
-		return
-	}
-	if _, ok := model.VerifyPassword(username, req.OldPassword); !ok {
+	if _, ok := model.VerifyPasswordByID(uid, req.OldPassword); !ok {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "原密码错误"})
 		return
 	}
@@ -91,6 +99,14 @@ func ChangePassword(c *gin.Context) {
 	if err := model.UpdatePassword(uid, req.NewPassword); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": err.Error()})
 		return
+	}
+	// 密码修改后token_version已递增, 重新加载用户签发新token(否则旧Cookie因version失效立即登出)
+	freshUser, err := model.GetUserByID(uid)
+	if err == nil {
+		token, expiresAt, genErr := auth.GenerateToken(freshUser)
+		if genErr == nil {
+			auth.SetAuthCookie(c, token, expiresAt)
+		}
 	}
 	c.JSON(http.StatusOK, gin.H{"success": true, "message": "密码已修改"})
 }

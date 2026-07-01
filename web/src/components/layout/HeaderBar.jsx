@@ -11,8 +11,8 @@ export default function HeaderBar() {
   const { username, logout } = useAuth()
   const navigate = useNavigate()
 
-  function handleLogout() {
-    logout()
+  async function handleLogout() {
+    await logout()
     navigate('/login', { replace: true })
   }
 
