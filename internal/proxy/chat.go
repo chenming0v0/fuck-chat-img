@@ -3,9 +3,11 @@ package proxy
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -16,7 +18,6 @@ import (
 	"github.com/google/uuid"
 )
 
-// chatRequest chat completions 请求
 type chatRequest struct {
 	Model    string          `json:"model"`
 	Messages json.RawMessage `json:"messages"`
@@ -24,7 +25,6 @@ type chatRequest struct {
 	raw      json.RawMessage
 }
 
-// HandleChat 处理 /v1/chat/completions (将 messages 视作 input, 走同样的图片混合逻辑)
 func HandleChat(c *gin.Context) {
 	bodyBytes, err := io.ReadAll(c.Request.Body)
 	if err != nil {
@@ -47,10 +47,9 @@ func HandleChat(c *gin.Context) {
 		return
 	}
 
-	// 缓存键: 输出影响参数指纹(stream/max_tokens/temperature/tools...) + messages 规范化
 	contentCanonical := normalizeForCache(req.Messages)
 	canonical := composeCacheCanonical(paramsFingerprint(req.raw), contentCanonical)
-	cacheKey := cache.Key(grp.Name, canonical)
+	cacheKey := cache.Key("chat", grp.Name, canonical)
 
 	start := time.Now()
 	reqID := "chat_" + strings.ReplaceAll(uuid.NewString(), "-", "")[:24]
@@ -61,7 +60,6 @@ func HandleChat(c *gin.Context) {
 			cache.RecordHit()
 			replayCacheEntry(c, e)
 			outSummary := cacheHitOutputSummary(e)
-			// 从缓存条目提取真实 usage, 避免历史 token 统计恒为 0
 			pt, ct := usageFromCacheEntry(e)
 			recordChatHistory(reqID, userID, grp, &req, e.HasImage, true, true, e.ImageModelUsed, grp.MainText.DisplayName(), e.ImageCount, pt, ct, time.Since(start), outSummary, "cache hit")
 			return
@@ -69,7 +67,7 @@ func HandleChat(c *gin.Context) {
 		cache.RecordMiss()
 	}
 
-	hasImage, imgCount, imgModelUsed, modified, imgErr := processImagesForMessages(grp, req.Messages)
+	hasImage, imgCount, imgModelUsed, modified, imgErr := processImagesForChatMessages(grp, req.Messages, c.Request.Context())
 	if imgErr != nil {
 		recordChatHistory(reqID, userID, grp, &req, hasImage, false, false, imgModelUsed, "", imgCount, 0, 0, time.Since(start), nil, imgErr.Error())
 		writeErr(c, http.StatusBadGateway, imgErr.Error())
@@ -84,110 +82,31 @@ func HandleChat(c *gin.Context) {
 	handleChatNonStream(c, grp, newBody, reqID, userID, &req, hasImage, imgCount, imgModelUsed, cacheKey, start)
 }
 
-// processImagesForMessages 处理 chat messages 中的图片
-// 兼容三种 content 形态:
-//   - 数组(标准 content array): 直接图片项 + tool_result 内嵌字符串图片
-//   - 字符串(Codex role=tool 输出等): 解析 JSON 后递归识别
-func processImagesForMessages(g *modelGroupRuntime, messages json.RawMessage) (hasImage bool, imgCount int, imgModelUsed string, modified []byte, err error) {
-	var arr []map[string]interface{}
-	if err := json.Unmarshal(messages, &arr); err != nil {
+func processImagesForChatMessages(g *modelGroupRuntime, messages json.RawMessage, ctx context.Context) (hasImage bool, imgCount int, imgModelUsed string, modified []byte, err error) {
+	if len(messages) == 0 {
 		return false, 0, "", messages, nil
 	}
-	client := sharedHTTPClient
-	// chat 协议文本项类型为 "text"(默认配置)
+	var v interface{}
+	if err := json.Unmarshal(messages, &v); err != nil {
+		return false, 0, "", messages, nil
+	}
 	cfg := defaultImgConfig(g)
-	for i := range arr {
-		// 1. 字符串 content(Codex role=tool 等): 走递归处理器
-		if s, ok := arr[i]["content"].(string); ok && s != "" {
-			newStr, hasImg, cnt, used, perr := processImagesInStringContentCfg(g, s, cfg)
-			if perr != nil {
-				// 失败时优先保留前面已累计的 imgModelUsed, 避免被本次失败的空值覆盖
-				return hasImage || hasImg, imgCount + cnt, pickImgModel(imgModelUsed, used), messages, perr
-			}
-			if hasImg {
-				hasImage = true
-				imgCount += cnt
-				imgModelUsed = used
-				arr[i]["content"] = newStr
-			}
-			continue
-		}
-		cont, ok := arr[i]["content"].([]interface{})
-		if !ok {
-			continue
-		}
-		// 收集需要追加的文本项(避免在 range 循环中修改切片)
-		var extraItems []interface{}
-		for j := 0; j < len(cont); j++ {
-			cm, ok := cont[j].(map[string]interface{})
-			if !ok {
-				continue
-			}
-			typ, _ := cm["type"].(string)
-			// 2. tool_result 项: 内嵌 content 可能是 JSON 字符串或数组, 递归处理
-			if typ == "tool_result" || typ == "tool_use" {
-				if sub, ok := cm["content"].([]interface{}); ok {
-					newV, r := processImagesInValueCfg(g, sub, cfg)
-					if r.err != nil {
-						return hasImage || r.hasImage, imgCount + r.imgCount, pickImgModel(imgModelUsed, r.imgModel), messages, r.err
-					}
-					if r.hasImage {
-						hasImage = true
-						imgCount += r.imgCount
-						if r.imgModel != "" {
-							imgModelUsed = r.imgModel
-						}
-						cm["content"] = newV
-					}
-				} else if ss, ok := cm["content"].(string); ok && ss != "" {
-					newStr, hasImg, cnt, used, perr := processImagesInStringContentCfg(g, ss, cfg)
-					if perr != nil {
-						return hasImage || hasImg, imgCount + cnt, pickImgModel(imgModelUsed, used), messages, perr
-					}
-					if hasImg {
-						hasImage = true
-						imgCount += cnt
-						imgModelUsed = used
-						cm["content"] = newStr
-					}
-				}
-				continue
-			}
-			// 3. 直接图片项(OpenAI image_url / Responses input_image / Claude image)
-			if !isImageContentItem(cm) {
-				continue
-			}
-			url, b64, ok := extractImageRef(cm)
-			if !ok {
-				continue
-			}
-			hasImage = true
-			imgCount++
-			imgs := nextImageModels(g)
-			desc, used, e := recognizeImage(imgs, g.ImageStrategy, g.ImagePrompt, url, b64, client)
-			if e != nil {
-				return hasImage, imgCount, pickImgModel(imgModelUsed, used), messages, e
-			}
-			imgModelUsed = used
-			textItem := map[string]interface{}{
-				"type": "text",
-				"text": "[图片识别结果]\n" + desc,
-			}
-			if g.ReplaceImage {
-				cont[j] = textItem
-			} else {
-				extraItems = append(extraItems, textItem)
-			}
-		}
-		if len(extraItems) > 0 {
-			arr[i]["content"] = append(cont, extraItems...)
-		}
+	newV, r := processImagesInValueCfg(g, v, cfg, ctx)
+	if r.err != nil {
+		return r.hasImage, r.imgCount, r.imgModel, messages, r.err
 	}
-	modified, err = json.Marshal(arr)
-	if err != nil {
-		return hasImage, imgCount, imgModelUsed, messages, err
+	if !r.modified {
+		return r.hasImage, r.imgCount, r.imgModel, messages, nil
 	}
-	return hasImage, imgCount, imgModelUsed, modified, nil
+	newBytes, mErr := json.Marshal(newV)
+	if mErr != nil {
+		return r.hasImage, r.imgCount, r.imgModel, messages, mErr
+	}
+	return r.hasImage, r.imgCount, r.imgModel, newBytes, nil
+}
+
+func processImagesForMessages(g *modelGroupRuntime, messages json.RawMessage) (hasImage bool, imgCount int, imgModelUsed string, modified []byte, err error) {
+	return processImagesForChatMessages(g, messages, context.Background())
 }
 
 func rebuildChatBody(raw json.RawMessage, newMessages []byte, g *modelGroupRuntime) []byte {
@@ -206,39 +125,75 @@ func rebuildChatBody(raw json.RawMessage, newMessages []byte, g *modelGroupRunti
 	return b
 }
 
-func handleChatNonStream(c *gin.Context, g *modelGroupRuntime, body []byte, reqID string, userID uint, req *chatRequest, hasImage bool, imgCount int, imgModelUsed string, cacheKey string, start time.Time) {
-	// 传播客户端 context: 客户端断连时上游请求会被取消, 避免上游 token 浪费
-	httpReq, err := http.NewRequestWithContext(c.Request.Context(), http.MethodPost, g.MainText.ChatURL(), bytes.NewReader(body))
+func fetchChatNonStream(g *modelGroupRuntime, body []byte, ctx context.Context, hasImage bool, imgCount int, imgModelUsed string, cacheKey string) (*cache.Entry, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, g.MainText.ChatURL(), bytes.NewReader(body))
 	if err != nil {
-		recordChatHistory(reqID, userID, g, req, hasImage, false, false, imgModelUsed, "", imgCount, 0, 0, time.Since(start), nil, err.Error())
-		writeErr(c, http.StatusInternalServerError, err.Error())
-		return
+		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+g.MainText.APIKey)
 	resp, err := sharedHTTPClient.Do(httpReq)
 	if err != nil {
-		recordChatHistory(reqID, userID, g, req, hasImage, false, false, imgModelUsed, "", imgCount, 0, 0, time.Since(start), nil, err.Error())
-		writeErr(c, http.StatusBadGateway, "上游请求失败: "+err.Error())
-		return
+		return nil, err
 	}
 	defer resp.Body.Close()
-	respBytes, _ := io.ReadAll(resp.Body)
+	respBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("read response body error: %v", err)
+		return nil, err
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		recordChatHistory(reqID, userID, g, req, hasImage, false, false, imgModelUsed, "", imgCount, 0, 0, time.Since(start), respBytes, fmt.Sprintf("上游 %d", resp.StatusCode))
-		writeErr(c, resp.StatusCode, fmt.Sprintf("上游返回 %d: %s", resp.StatusCode, truncate(string(respBytes), 800)))
+		return nil, &upstreamError{
+			statusCode: resp.StatusCode,
+			body:       respBytes,
+			msg:        fmt.Sprintf("上游 %d", resp.StatusCode),
+		}
+	}
+	entry := &cache.Entry{
+		Key:            cacheKey,
+		Value:          respBytes,
+		IsStream:       false,
+		ModelName:      g.Name,
+		HasImage:       hasImage,
+		ImageCount:     imgCount,
+		ImageModelUsed: imgModelUsed,
+	}
+	return entry, nil
+}
+
+func handleChatNonStream(c *gin.Context, g *modelGroupRuntime, body []byte, reqID string, userID uint, req *chatRequest, hasImage bool, imgCount int, imgModelUsed string, cacheKey string, start time.Time) {
+	var entry *cache.Entry
+	var fetchErr error
+	if cache.Enabled() {
+		entry, fetchErr = cache.Do(cacheKey, func() (*cache.Entry, error) {
+			e, err := fetchChatNonStream(g, body, c.Request.Context(), hasImage, imgCount, imgModelUsed, cacheKey)
+			if err != nil {
+				return nil, err
+			}
+			cache.PutWithMeta(cacheKey, g.Name, e.Value, hasImage, imgCount, imgModelUsed)
+			return e, nil
+		})
+	} else {
+		entry, fetchErr = fetchChatNonStream(g, body, c.Request.Context(), hasImage, imgCount, imgModelUsed, cacheKey)
+	}
+	if fetchErr != nil {
+		if ue, ok := fetchErr.(*upstreamError); ok {
+			recordChatHistory(reqID, userID, g, req, hasImage, false, false, imgModelUsed, "", imgCount, 0, 0, time.Since(start), ue.body, ue.msg)
+			writeErr(c, ue.statusCode, fmt.Sprintf("上游返回 %d: %s", ue.statusCode, truncate(string(ue.body), 800)))
+		} else {
+			recordChatHistory(reqID, userID, g, req, hasImage, false, false, imgModelUsed, "", imgCount, 0, 0, time.Since(start), nil, fetchErr.Error())
+			writeErr(c, http.StatusBadGateway, "上游请求失败: "+fetchErr.Error())
+		}
 		return
 	}
-	if cache.Enabled() {
-		cache.PutWithMeta(cacheKey, g.Name, respBytes, hasImage, imgCount, imgModelUsed)
-	}
+	respBytes := entry.Value
 	pt, ct := extractUsage(respBytes)
 	recordChatHistory(reqID, userID, g, req, hasImage, true, false, imgModelUsed, g.MainText.DisplayName(), imgCount, pt, ct, time.Since(start), respBytes, "")
 	c.Data(http.StatusOK, "application/json", respBytes)
 }
 
 func handleChatStream(c *gin.Context, g *modelGroupRuntime, body []byte, reqID string, userID uint, req *chatRequest, hasImage bool, imgCount int, imgModelUsed string, cacheKey string, start time.Time) {
-	// 传播客户端 context: 客户端断连时取消上游请求, 避免上游继续生成造成 token 浪费
 	httpReq, err := http.NewRequestWithContext(c.Request.Context(), http.MethodPost, g.MainText.ChatURL(), bytes.NewReader(body))
 	if err != nil {
 		recordChatHistory(reqID, userID, g, req, hasImage, false, false, imgModelUsed, "", imgCount, 0, 0, time.Since(start), nil, err.Error())
@@ -248,7 +203,6 @@ func handleChatStream(c *gin.Context, g *modelGroupRuntime, body []byte, reqID s
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "text/event-stream")
 	httpReq.Header.Set("Authorization", "Bearer "+g.MainText.APIKey)
-	// 流式必须使用 sharedStreamHTTPClient(不设整体 Timeout, 避免长 SSE 被切断)
 	resp, err := sharedStreamHTTPClient.Do(httpReq)
 	if err != nil {
 		recordChatHistory(reqID, userID, g, req, hasImage, false, false, imgModelUsed, "", imgCount, 0, 0, time.Since(start), nil, err.Error())
@@ -257,7 +211,10 @@ func handleChatStream(c *gin.Context, g *modelGroupRuntime, body []byte, reqID s
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		respBytes, _ := io.ReadAll(resp.Body)
+		respBytes, err := io.ReadAll(resp.Body)
+		if err != nil {
+			log.Printf("read error response body error: %v", err)
+		}
 		recordChatHistory(reqID, userID, g, req, hasImage, false, false, imgModelUsed, "", imgCount, 0, 0, time.Since(start), respBytes, fmt.Sprintf("上游 %d", resp.StatusCode))
 		writeErr(c, resp.StatusCode, fmt.Sprintf("上游返回 %d: %s", resp.StatusCode, truncate(string(respBytes), 800)))
 		return
@@ -274,13 +231,10 @@ func handleChatStream(c *gin.Context, g *modelGroupRuntime, body []byte, reqID s
 	for {
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
-			// 真流式: 收到一行立即写出并 Flush
 			_, werr := c.Writer.Write(line)
 			if flusher != nil {
 				flusher.Flush()
 			}
-			// 检测客户端断连: 写入错误或 context 取消都意味着客户端已离开,
-			// 必须立即停止读上游, 避免上游空跑浪费 token + 把未送达响应写入缓存
 			if clientGone(c, werr) {
 				clientDisconnected = true
 				break
@@ -297,7 +251,6 @@ func handleChatStream(c *gin.Context, g *modelGroupRuntime, body []byte, reqID s
 	if flusher != nil && !clientDisconnected {
 		flusher.Flush()
 	}
-	// 仅在客户端完整接收(未断连)时写入缓存, 防止"用户中途取消的响应"污染缓存
 	if cache.Enabled() && len(collected) > 0 && !clientDisconnected {
 		cache.PutStreamWithMeta(cacheKey, g.Name, collected, hasImage, imgCount, imgModelUsed)
 	}
@@ -305,11 +258,9 @@ func handleChatStream(c *gin.Context, g *modelGroupRuntime, body []byte, reqID s
 	if !clientDisconnected {
 		respBytes = bytes.Join(collected, nil)
 	}
-	// 客户端断连时标记 success=false, 避免历史记录误报成功
 	recordChatHistory(reqID, userID, g, req, hasImage, !clientDisconnected, false, imgModelUsed, g.MainText.DisplayName(), imgCount, pt, ct, time.Since(start), respBytes, clientDisconnectedMsg(clientDisconnected))
 }
 
-// HandleModels /v1/models 返回所有启用的模型组(以及可选直通)
 func HandleModels(c *gin.Context) {
 	var groups []model.ModelGroup
 	model.DB.Where("enabled = ?", true).Find(&groups)
@@ -325,13 +276,11 @@ func HandleModels(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"object": "list", "data": data})
 }
 
-// recordChatHistory 异步记录历史(chat 端点)
-// userID / imgCount 透传, 实现用户隔离与图片数量统计.
 func recordChatHistory(reqID string, userID uint, g *modelGroupRuntime, req *chatRequest, hasImage, success, cacheHit bool, imgModelUsed, mainModelUsed string, imgCount, pt, ct int, dur time.Duration, respBytes []byte, errMsg string) {
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				// 防止异步 goroutine panic 导致进程崩溃
+				log.Printf("recordChatHistory panic: %v", r)
 			}
 		}()
 		h := model.History{
@@ -353,6 +302,8 @@ func recordChatHistory(reqID string, userID uint, g *modelGroupRuntime, req *cha
 			InputSummary:     truncate(string(req.Messages), 2000),
 			OutputSummary:    truncate(string(respBytes), 2000),
 		}
-		model.DB.Create(&h)
+		if err := model.DB.Create(&h).Error; err != nil {
+			log.Printf("recordChatHistory create error: %v", err)
+		}
 	}()
 }

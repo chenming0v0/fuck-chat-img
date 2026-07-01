@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -128,28 +129,27 @@ func corsMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		origin := c.GetHeader("Origin")
 		if origin != "" {
+			c.Header("Vary", "Origin")
 			allow := false
-			host := c.Request.Host
-			// 去除端口号进行比对(Host 可能含端口, Origin 也含端口, 直接前缀匹配即可)
-			if strings.HasPrefix(origin, "http://"+host) || strings.HasPrefix(origin, "https://"+host) {
-				allow = true
-			} else {
-				// 检查显式白名单
-				p := sameOriginHosts.Load()
-				if p != nil {
-					for _, h := range *p {
-						if origin == h {
-							allow = true
-							break
+			if u, err := url.Parse(origin); err == nil {
+				if u.Host == c.Request.Host {
+					allow = true
+				} else {
+					p := sameOriginHosts.Load()
+					if p != nil {
+						for _, h := range *p {
+							if origin == h {
+								allow = true
+								break
+							}
 						}
 					}
 				}
 			}
 			if allow {
 				c.Header("Access-Control-Allow-Origin", origin)
-				c.Header("Vary", "Origin")
 				c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-				c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+				c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, Cache-Control, X-Requested-With")
 				c.Header("Access-Control-Expose-Headers", "Content-Length, Content-Type")
 				c.Header("Access-Control-Allow-Credentials", "true")
 			}
@@ -160,20 +160,6 @@ func corsMiddleware() gin.HandlerFunc {
 		}
 		c.Next()
 	}
-}
-
-// isSameOrigin 判断 origin 是否在显式白名单中(辅助函数, 主要逻辑在 corsMiddleware)
-func isSameOrigin(origin string) bool {
-	p := sameOriginHosts.Load()
-	if p == nil {
-		return false
-	}
-	for _, h := range *p {
-		if origin == h {
-			return true
-		}
-	}
-	return false
 }
 
 // SetSameOriginHosts 设置允许的显式 Origin 白名单(供部署方按需放开跨域)
@@ -263,7 +249,6 @@ func registerWebStatic(r *gin.Engine) {
 		}
 	}
 
-	// 静态资源路由(请求 /static/js/x.js → FS 中 static/js/x.js)
 	r.GET("/static/*filepath", func(c *gin.Context) {
 		if rootFS == nil {
 			c.Status(http.StatusNotFound)
@@ -274,8 +259,12 @@ func registerWebStatic(r *gin.Engine) {
 			c.Status(http.StatusNotFound)
 			return
 		}
-		// 安全: 防 path traversal. os.DirFS 不阻止 .. 越界, 攻击者构造
-		// /static/../../etc/passwd 可读取任意文件. 显式拒绝 .. 并校验 Clean 后仍位于 static/ 下.
+		decoded, err := url.PathUnescape(fp)
+		if err != nil {
+			c.Status(http.StatusNotFound)
+			return
+		}
+		fp = decoded
 		if strings.Contains(fp, "..") {
 			c.Status(http.StatusNotFound)
 			return
@@ -293,13 +282,17 @@ func registerWebStatic(r *gin.Engine) {
 		serveIndex(c, indexBytes)
 	})
 
-	// SPA 深链回退
 	r.NoRoute(func(c *gin.Context) {
-		if strings.HasPrefix(c.Request.URL.Path, "/api") || strings.HasPrefix(c.Request.URL.Path, "/v1") {
+		p := c.Request.URL.Path
+		if strings.HasPrefix(p, "/api/") || p == "/api" {
 			c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "not found", "type": "not_found"}})
 			return
 		}
-		if strings.HasPrefix(c.Request.URL.Path, "/static") {
+		if strings.HasPrefix(p, "/v1/") || p == "/v1" {
+			c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "not found", "type": "not_found"}})
+			return
+		}
+		if strings.HasPrefix(p, "/static/") || p == "/static" {
 			c.Status(http.StatusNotFound)
 			return
 		}

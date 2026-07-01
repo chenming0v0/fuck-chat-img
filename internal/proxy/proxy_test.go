@@ -14,23 +14,18 @@ import (
 	"github.com/fuck-chat-img/fci/internal/config"
 	"github.com/fuck-chat-img/fci/internal/model"
 	"github.com/gin-gonic/gin"
-	"gorm.io/driver/sqlite"
-	"gorm.io/gorm"
 )
 
 // setupTestEnv 构建一个带模拟上游的测试环境
 func setupTestEnv(t *testing.T) (*gin.Engine, *int, *int, *[]byte) {
 	t.Helper()
-	// 内存数据库
-	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared&_busy_timeout=5000"), &gorm.Config{})
-	if err != nil {
+	if err := model.InitTestDB("file::memory:?cache=shared"); err != nil {
 		t.Fatal(err)
 	}
-	db.AutoMigrate(&model.User{}, &model.ModelGroup{}, &model.History{})
-	// 清空共享内存库的残留
+	db := model.DB
 	db.Exec("DELETE FROM model_groups")
 	db.Exec("DELETE FROM histories")
-	model.DB = db
+	db.Exec("DELETE FROM users")
 
 	cfg := config.Get()
 	cfg.CacheEnabled = true
@@ -261,14 +256,13 @@ func TestModelsEndpoint(t *testing.T) {
 // 模拟图片模型返回固定描述, 模拟上游 Claude API 返回固定 message
 func setupMessagesTestEnv(t *testing.T) (*gin.Engine, *int, *int) {
 	t.Helper()
-	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared&_busy_timeout=5000"), &gorm.Config{})
-	if err != nil {
+	if err := model.InitTestDB("file::memory:?cache=shared"); err != nil {
 		t.Fatal(err)
 	}
-	db.AutoMigrate(&model.User{}, &model.ModelGroup{}, &model.History{})
+	db := model.DB
 	db.Exec("DELETE FROM model_groups")
 	db.Exec("DELETE FROM histories")
-	model.DB = db
+	db.Exec("DELETE FROM users")
 
 	cfg := config.Get()
 	cfg.CacheEnabled = true

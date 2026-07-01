@@ -3,6 +3,8 @@ package cache
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -22,9 +24,9 @@ var (
 	flights  = make(map[string]*call)
 )
 
-// Do 执行并返回缓存查询结果, 对相同key的并发请求进行合并, 防止缓存击穿
-// 仅一个请求实际执行fn, 其余并发请求等待其结果共享
-func Do(key string, fn func() (*Entry, error)) (*Entry, error) {
+var errPanic = errors.New("singleflight: fn panic")
+
+func Do(key string, fn func() (*Entry, error)) (val *Entry, err error) {
 	flightMu.Lock()
 	if c, ok := flights[key]; ok {
 		flightMu.Unlock()
@@ -36,12 +38,19 @@ func Do(key string, fn func() (*Entry, error)) (*Entry, error) {
 	flights[key] = c
 	flightMu.Unlock()
 
-	c.val, c.err = fn()
+	defer func() {
+		if r := recover(); r != nil {
+			c.err = fmt.Errorf("%w: %v", errPanic, r)
+		}
+		flightMu.Lock()
+		delete(flights, key)
+		flightMu.Unlock()
+		c.wg.Done()
+		val = c.val
+		err = c.err
+	}()
 
-	flightMu.Lock()
-	delete(flights, key)
-	flightMu.Unlock()
-	c.wg.Done()
+	c.val, c.err = fn()
 
 	return c.val, c.err
 }
@@ -136,8 +145,10 @@ func loadStore() *Store {
 	return v.(*Store)
 }
 
-func Key(modelGroup string, canonicalInput []byte) string {
+func Key(endpoint, modelGroup string, canonicalInput []byte) string {
 	h := sha256.New()
+	h.Write([]byte(endpoint))
+	h.Write([]byte{0})
 	h.Write([]byte(modelGroup))
 	h.Write([]byte{0})
 	h.Write(canonicalInput)
@@ -149,27 +160,18 @@ func Get(key string) (*Entry, bool) {
 	if s == nil || !s.enabled {
 		return nil, false
 	}
-	s.mu.RLock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	e, ok := s.items[key]
 	if !ok {
-		s.mu.RUnlock()
 		return nil, false
 	}
 	if !e.ExpiresAt.IsZero() && time.Now().After(e.ExpiresAt) {
-		expired := e
-		s.mu.RUnlock()
-		s.mu.Lock()
-		if cur, ok := s.items[key]; ok && cur == expired {
-			s.deleteLocked(key)
-		}
-		s.mu.Unlock()
+		s.deleteLocked(key)
 		return nil, false
 	}
-	atomic.AddInt64(&e.HitCount, 1)
-	s.mu.RUnlock()
-	s.mu.Lock()
+	e.HitCount++
 	s.touchLocked(key)
-	s.mu.Unlock()
 	return e, true
 }
 

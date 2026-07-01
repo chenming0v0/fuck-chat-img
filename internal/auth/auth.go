@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -91,11 +90,13 @@ func ValidateTokenVersion(claims *Claims) bool {
 
 // SetAuthCookie 设置HttpOnly认证Cookie(JWT存储), 防止XSS窃取token
 func SetAuthCookie(c *gin.Context, token string, expiresAt time.Time) {
+	secure := gin.Mode() == gin.ReleaseMode
 	cookie := &http.Cookie{
 		Name:     CookieName,
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
+		Secure:   secure,
 		SameSite: http.SameSiteLaxMode,
 		Expires:  expiresAt,
 		MaxAge:   int(time.Until(expiresAt).Seconds()),
@@ -105,11 +106,13 @@ func SetAuthCookie(c *gin.Context, token string, expiresAt time.Time) {
 
 // ClearAuthCookie 清除认证Cookie(登出时调用)
 func ClearAuthCookie(c *gin.Context) {
+	secure := gin.Mode() == gin.ReleaseMode
 	cookie := &http.Cookie{
 		Name:     CookieName,
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,
+		Secure:   secure,
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   -1,
 		Expires:  time.Unix(0, 0),
@@ -222,9 +225,9 @@ func MiddlewareAdmin() gin.HandlerFunc {
 //  3. JWT 可走 Header 或 query(后者用于 SSE/EventSource); query 不接受 proxy key
 func MiddlewareProxyAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		cfg := config.Get()
 		token := extractToken(c)
-		proxyKey := os.Getenv("FCI_PROXY_KEY")
-		// 1. 先尝试解析为 Web UI 的 JWT(query 或 header 均可, JWT 短效)
+		proxyKey := cfg.ProxyKey
 		if token != "" {
 			if claims, err := ParseToken(token); err == nil {
 				if !ValidateTokenVersion(claims) {
@@ -234,7 +237,6 @@ func MiddlewareProxyAuth() gin.HandlerFunc {
 					return
 				}
 				isAdmin := claims.Role == "admin"
-				// 未配置 proxy key 时, 仅管理员 JWT 放行(H6: 此前任意有效 JWT 都放行, 违反文档承诺)
 				if !isAdmin && proxyKey == "" {
 					c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
 						"error": gin.H{"message": "non-admin JWT not allowed without FCI_PROXY_KEY", "type": "auth_error", "code": 403},
@@ -249,9 +251,9 @@ func MiddlewareProxyAuth() gin.HandlerFunc {
 				return
 			}
 		}
-		// 2. 校验代理访问密钥(常量时间比较, 防时序侧信道; 仅从 Header 取, 避免 query 泄漏)
 		if proxyKey != "" {
-			if pk := extractProxyKey(c); pk != "" && subtle.ConstantTimeCompare([]byte(pk), []byte(proxyKey)) == 1 {
+			pk := extractProxyKey(c)
+			if pk != "" && subtle.ConstantTimeCompare([]byte(pk), []byte(proxyKey)) == 1 {
 				c.Set(ContextKeyUserID, ProxyUserID)
 				c.Set(ContextKeyUsername, "__proxy__")
 				c.Set(ContextKeyRole, "proxy")
@@ -264,7 +266,6 @@ func MiddlewareProxyAuth() gin.HandlerFunc {
 			})
 			return
 		}
-		// 3. 未配置代理密钥且无有效 JWT: 拒绝
 		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
 			"error": gin.H{"message": "authentication required (configure FCI_PROXY_KEY or login as admin via Web UI)", "type": "auth_error", "code": 401},
 		})
