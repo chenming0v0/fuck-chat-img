@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"net"
 	"net/http"
 	"os/signal"
 	"syscall"
@@ -26,58 +27,52 @@ func main() {
 	r := api.SetupRouter()
 	cfg := config.Get()
 
-	// 优雅关闭: 捕获 SIGINT/SIGTERM, 给正在进行的流式 SSE 请求留足时间收尾,
-	// 避免被 SIGKILL 直接切断导致上游写入未完成 / 客户端收到截断响应.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	defer func() {
+		if sqlDB, err := model.DB.DB(); err == nil {
+			sqlDB.Close()
+		}
+	}()
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
 		Handler:           r,
 		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       0,
+		ReadTimeout:       400 * time.Second,
 		IdleTimeout:       60 * time.Second,
 		WriteTimeout:      3600 * time.Second,
+	}
+
+	ln, err := net.Listen("tcp", cfg.ListenAddr)
+	if err != nil {
+		log.Fatalf("[fci] 监听 %s 失败: %v", cfg.ListenAddr, err)
 	}
 
 	serverErr := make(chan error, 1)
 	go func() {
 		log.Printf("[fci] 服务已启动，监听 %s", cfg.ListenAddr)
 		log.Printf("[fci] 代理端点: /v1/responses /v1/chat/completions")
-		serverErr <- srv.ListenAndServe()
+		serverErr <- srv.Serve(ln)
 	}()
 
 	select {
 	case err := <-serverErr:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("[fci] 启动失败: %v", err)
-		}
-		if sqlDB, dbErr := model.DB.DB(); dbErr == nil {
-			sqlDB.Close()
-		}
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("[fci] 服务启动失败退出")
+			log.Printf("[fci] 服务错误: %v", err)
+			log.Fatalf("[fci] 服务异常退出")
 		}
 		return
 	case <-ctx.Done():
 		log.Printf("[fci] 收到退出信号, 正在优雅关闭...")
-		// stop() 释放信号订阅; 此后再收到 SIGINT/SIGTERM 将采用默认行为(强制退出).
 		stop()
 	}
 
-	// 给流式请求最多 30s 收尾; 超时后强制断开剩余连接.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Printf("[fci] 优雅关闭超时或出错: %v", err)
-	}
-
-	if sqlDB, err := model.DB.DB(); err != nil {
-		log.Printf("[fci] 获取底层数据库连接失败: %v", err)
-	} else {
-		if err := sqlDB.Close(); err != nil {
-			log.Printf("[fci] 关闭数据库连接失败: %v", err)
-		}
 	}
 	log.Printf("[fci] 已退出")
 }

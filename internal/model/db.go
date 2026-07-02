@@ -41,11 +41,13 @@ func initDB(dsn string, needEnv bool) error {
 	}
 	sqlDB.SetMaxOpenConns(1)
 	if err := db.AutoMigrate(&User{}, &ModelGroup{}, &History{}); err != nil {
+		sqlDB.Close()
 		return err
 	}
 	DB = db
 	if needEnv {
 		if err := initAdminFromEnv(); err != nil {
+			sqlDB.Close()
 			return err
 		}
 	}
@@ -94,7 +96,7 @@ func initAdminFromEnv() error {
 		log.Printf("[fci] 已存在 %d 个用户, 跳过环境变量管理员创建", count)
 		return nil
 	}
-	hash, err := bcrypt.GenerateFromPassword([]byte(cfg.InitAdminPass), bcrypt.DefaultCost)
+	hash, err := bcrypt.GenerateFromPassword([]byte(cfg.InitAdminPass), config.BcryptCost)
 	if err != nil {
 		return err
 	}
@@ -140,7 +142,7 @@ func SetupAdmin(username, password string) error {
 	if err := config.ValidatePasswordStrength(password); err != nil {
 		return err
 	}
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), config.BcryptCost)
 	if err != nil {
 		return err
 	}
@@ -151,7 +153,6 @@ func SetupAdmin(username, password string) error {
 		Status:       1,
 	}
 	if err := DB.Create(&u).Error; err != nil {
-		// 用户名唯一约束冲突时返回友好提示
 		if errors.Is(err, gorm.ErrDuplicatedKey) || isUniqueConstraintErr(err) {
 			return fmt.Errorf("用户名 %s 已存在", username)
 		}
@@ -205,14 +206,17 @@ func VerifyPasswordByID(userID uint, password string) (*User, bool) {
 
 // UpdatePassword 更新密码并递增token_version, 立即使所有旧JWT失效
 func UpdatePassword(userID uint, newPlain string) error {
+	if userID == 0 {
+		return errors.New("invalid user id")
+	}
 	if err := config.ValidatePasswordStrength(newPlain); err != nil {
 		return err
 	}
-	hash, err := bcrypt.GenerateFromPassword([]byte(newPlain), bcrypt.DefaultCost)
+	hash, err := bcrypt.GenerateFromPassword([]byte(newPlain), config.BcryptCost)
 	if err != nil {
 		return err
 	}
-	result := DB.Model(&User{}).Where("id = ?", userID).Updates(map[string]interface{}{
+	result := DB.Model(&User{}).Where("id = ? AND status = 1", userID).Updates(map[string]interface{}{
 		"password_hash": string(hash),
 		"token_version": gorm.Expr("token_version + 1"),
 	})
@@ -228,7 +232,7 @@ func UpdatePassword(userID uint, newPlain string) error {
 // GetUserTokenVersion 获取用户当前token版本
 func GetUserTokenVersion(userID uint) (int, error) {
 	var u User
-	if err := DB.Select("token_version").First(&u, userID).Error; err != nil {
+	if err := DB.Select("token_version").Where("id = ? AND status = 1", userID).First(&u).Error; err != nil {
 		return 0, err
 	}
 	return u.TokenVersion, nil
@@ -237,7 +241,7 @@ func GetUserTokenVersion(userID uint) (int, error) {
 // GetUserByID 根据ID获取用户
 func GetUserByID(userID uint) (*User, error) {
 	var u User
-	if err := DB.First(&u, userID).Error; err != nil {
+	if err := DB.Where("id = ? AND status = 1", userID).First(&u).Error; err != nil {
 		return nil, err
 	}
 	return &u, nil

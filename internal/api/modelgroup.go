@@ -2,6 +2,8 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -119,7 +121,11 @@ func CreateGroup(c *gin.Context) {
 		Enabled:       req.Enabled,
 	}
 	if err := model.DB.Create(&g).Error; err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "创建失败(可能名称已存在): " + err.Error()})
+		if errors.Is(err, gorm.ErrDuplicatedKey) || isUniqueConstraintErr(err) {
+			c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "模型组名称已存在"})
+			return
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "创建失败: " + err.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": groupToDTO(g, false), "message": "创建成功"})
@@ -137,6 +143,7 @@ func UpdateGroup(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"success": false, "message": "模型组不存在"})
 		return
 	}
+	oldName := g.Name
 	var req createGroupReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "参数错误: " + err.Error()})
@@ -168,6 +175,9 @@ func UpdateGroup(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "更新失败: " + err.Error()})
 		return
 	}
+	if oldName != req.Name {
+		proxy.DeleteRRIndex(oldName)
+	}
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": groupToDTO(g, false), "message": "更新成功"})
 }
 
@@ -198,17 +208,21 @@ func ToggleGroup(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "非法 id"})
 		return
 	}
-	var g model.ModelGroup
-	if err := model.DB.First(&g, id).Error; err != nil {
+	result := model.DB.Model(&model.ModelGroup{}).Where("id = ?", id).UpdateColumn("enabled", gorm.Expr("NOT enabled"))
+	if result.Error != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "更新失败: " + result.Error.Error()})
+		return
+	}
+	if result.RowsAffected == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"success": false, "message": "模型组不存在"})
 		return
 	}
-	g.Enabled = !g.Enabled
-	if err := model.DB.Save(&g).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "更新失败: " + err.Error()})
+	var g model.ModelGroup
+	if err := model.DB.First(&g, id).Error; err == nil {
+		c.JSON(http.StatusOK, gin.H{"success": true, "data": gin.H{"enabled": g.Enabled}})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"success": true, "data": gin.H{"enabled": g.Enabled}})
+	c.JSON(http.StatusOK, gin.H{"success": true, "message": "状态已切换"})
 }
 
 // TestGroup 测试模型组
@@ -237,29 +251,37 @@ type createGroupReq struct {
 	Enabled       bool                 `json:"enabled"`
 }
 
+const (
+	maxNameLength        = 128
+	maxDescriptionLength = 512
+)
+
 func validateUpstreamModel(m *model.UpstreamModel, label string) error {
-	if m.APIType != "" {
-		valid := false
-		switch m.APIType {
-		case "openai", "azure", "anthropic":
-			valid = true
-		}
-		if !valid {
-			return errStr(label + " api_type 仅支持 openai/azure/anthropic")
-		}
+	if m.APIType == "" {
+		m.APIType = "openai"
+	}
+	valid := false
+	switch m.APIType {
+	case "openai", "azure", "anthropic":
+		valid = true
+	}
+	if !valid {
+		return errStr(label + " api_type 仅支持 openai/azure/anthropic")
 	}
 	if m.MaxRetries < 0 {
 		return errStr(label + " max_retries 不能小于 0")
 	}
-	if m.Weight == 0 {
-		m.Weight = 1
+	if m.MaxRetries == 0 {
+		m.MaxRetries = 1
 	}
 	if m.Weight < 0 {
 		return errStr(label + " weight 不能为负数")
 	}
-	if m.MaxRetries == 0 {
-		m.MaxRetries = 1
+	if m.Weight == 0 {
+		m.Weight = 1
 	}
+	m.BaseURL = strings.TrimSpace(m.BaseURL)
+	m.Model = strings.TrimSpace(m.Model)
 	return nil
 }
 
@@ -268,6 +290,14 @@ func validateGroupReq(r *createGroupReq) error {
 	if r.Name == "" {
 		return errStr("模型组名称不能为空")
 	}
+	if len(r.Name) > maxNameLength {
+		return errStr("模型组名称不能超过 " + strconv.Itoa(maxNameLength) + " 字符")
+	}
+	r.Description = strings.TrimSpace(r.Description)
+	if len(r.Description) > maxDescriptionLength {
+		return errStr("描述不能超过 " + strconv.Itoa(maxDescriptionLength) + " 字符")
+	}
+	r.ImagePrompt = strings.TrimSpace(r.ImagePrompt)
 	if r.MainTextModel.BaseURL == "" || r.MainTextModel.APIKey == "" || r.MainTextModel.Model == "" {
 		return errStr("主对话模型需填写 base_url/api_key/model")
 	}
@@ -303,11 +333,23 @@ type validateErr struct{ msg string }
 
 func (e *validateErr) Error() string { return e.msg }
 
+func isUniqueConstraintErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "UNIQUE constraint failed") || strings.Contains(s, "Duplicate entry")
+}
+
 func groupToDTO(g model.ModelGroup, maskKey bool) gin.H {
 	var main model.UpstreamModel
-	_ = json.Unmarshal([]byte(g.MainTextModel), &main)
+	if err := json.Unmarshal([]byte(g.MainTextModel), &main); err != nil {
+		log.Printf("[fci] warn: unmarshal main_text_model for group %d failed: %v", g.ID, err)
+	}
 	var imgs []model.UpstreamModel
-	_ = json.Unmarshal([]byte(g.ImageModels), &imgs)
+	if err := json.Unmarshal([]byte(g.ImageModels), &imgs); err != nil {
+		log.Printf("[fci] warn: unmarshal image_models for group %d failed: %v", g.ID, err)
+	}
 	if maskKey {
 		main.APIKey = maskKeyStr(main.APIKey)
 		for i := range imgs {
@@ -333,8 +375,8 @@ func maskKeyStr(k string) string {
 	if k == "" {
 		return ""
 	}
-	if len(k) <= 8 {
+	if len(k) <= 4 {
 		return strings.Repeat("*", len(k))
 	}
-	return k[:4] + strings.Repeat("*", len(k)-8) + k[len(k)-4:]
+	return strings.Repeat("*", len(k)-4) + k[len(k)-4:]
 }

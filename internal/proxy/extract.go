@@ -7,6 +7,9 @@ import (
 )
 
 type imgProcessConfig struct {
+	// replaceImage=true: 图片项直接替换为文本描述(上游模型无需支持视觉, 但丢失原始图片引用)
+	// replaceImage=false: 图片项保留, 文本描述追加到后面(上游需支持视觉, 但保留多模态能力)
+	// 限制: 嵌套在字符串中的 JSON 图片始终被替换为文本(无法追加到结构外)
 	replaceImage bool
 	textType     string
 }
@@ -165,9 +168,7 @@ func mergeResult(res, sub *imgResult) {
 	if sub.hasImage {
 		res.hasImage = true
 		res.imgCount += sub.imgCount
-		if sub.imgModel != "" {
-			res.imgModel = sub.imgModel
-		}
+		res.imgModel = pickImgModel(res.imgModel, sub.imgModel)
 	}
 	if sub.modified {
 		res.modified = true

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -48,13 +49,35 @@ func imageContentHash(c map[string]interface{}) string {
 	return hex.EncodeToString(h.Sum(nil))[:32]
 }
 
+// detectImageTypeFromBase64 从纯 base64 数据检测图片真实类型
+// 通过解码前几个字节检查 magic bytes, 返回 image/png, image/jpeg, image/gif, image/webp 等
+func detectImageTypeFromBase64(b64 string) string {
+	raw, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		return "image/png"
+	}
+	switch {
+	case bytes.HasPrefix(raw, []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}):
+		return "image/png"
+	case bytes.HasPrefix(raw, []byte{0xFF, 0xD8, 0xFF}):
+		return "image/jpeg"
+	case bytes.HasPrefix(raw, []byte("GIF87a")), bytes.HasPrefix(raw, []byte("GIF89a")):
+		return "image/gif"
+	case bytes.HasPrefix(raw, []byte("RIFF")) && len(raw) > 11 && bytes.Equal(raw[8:12], []byte("WEBP")):
+		return "image/webp"
+	case bytes.HasPrefix(raw, []byte{0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70}):
+		return "image/avif"
+	default:
+		return "image/png"
+	}
+}
+
 // stripDataURLPrefix 从 data:image/...;base64,XXX 中提取纯 base64 部分
 // 若不是 data URL 则原样返回
 func stripDataURLPrefix(s string) string {
 	if !strings.HasPrefix(s, "data:") {
 		return s
 	}
-	// data:image/png;base64,XXXX
 	if i := strings.Index(s, ","); i >= 0 {
 		return s[i+1:]
 	}
@@ -98,7 +121,8 @@ func extractImageRef(c map[string]interface{}) (url string, b64 string, ok bool)
 			if strings.HasPrefix(s, "data:") {
 				return "", s, true
 			}
-			return "", "data:image/png;base64," + s, true
+			mimeType := detectImageTypeFromBase64(s)
+			return "", "data:" + mimeType + ";base64," + s, true
 		}
 	}
 	if i, has := c["image"]; has {
@@ -106,10 +130,10 @@ func extractImageRef(c map[string]interface{}) (url string, b64 string, ok bool)
 			if strings.HasPrefix(s, "data:") {
 				return "", s, true
 			}
-			return "", "data:image/png;base64," + s, true
+			mimeType := detectImageTypeFromBase64(s)
+			return "", "data:" + mimeType + ";base64," + s, true
 		}
 	}
-	// Claude 格式: {type: image, source: {type: base64|url, media_type, data|url}}
 	if src, has := c["source"]; has {
 		if m, ok2 := src.(map[string]interface{}); ok2 {
 			st, _ := m["type"].(string)
@@ -118,7 +142,7 @@ func extractImageRef(c map[string]interface{}) (url string, b64 string, ok bool)
 				if data, _ := m["data"].(string); data != "" {
 					mt, _ := m["media_type"].(string)
 					if mt == "" {
-						mt = "image/png"
+						mt = detectImageTypeFromBase64(data)
 					}
 					return "", "data:" + mt + ";base64," + data, true
 				}
@@ -223,7 +247,7 @@ func callImageModel(ctx context.Context, m UpstreamModelRT, prompt string, image
 		return "", err
 	}
 	defer resp.Body.Close()
-	respBytes, err := io.ReadAll(resp.Body)
+	respBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxImageRespSize))
 	if err != nil {
 		log.Printf("read image model response error: %v", err)
 		return "", err

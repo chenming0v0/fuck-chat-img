@@ -30,8 +30,11 @@ import {
 import { useAuth } from '@/helpers/auth'
 
 // 默认上游模型对象
+let _imgUidCounter = 0
 function defaultUpstream() {
+  _imgUidCounter += 1
   return {
+    _uid: _imgUidCounter,
     base_url: '',
     api_key: '',
     model: '',
@@ -156,15 +159,19 @@ export default function ModelGroup() {
           weight:
             g.main_text_model?.weight != null ? g.main_text_model?.weight : 1,
         }
-        const imgs = (g.image_models || []).map((m) => ({
-          base_url: m.base_url || '',
-          api_key: m.api_key || '',
-          model: m.model || '',
-          api_type: m.api_type || 'openai',
-          extra_url: m.extra_url || '',
-          max_retries: m.max_retries != null ? m.max_retries : 1,
-          weight: m.weight != null ? m.weight : 1,
-        }))
+        const imgs = (g.image_models || []).map((m) => {
+          _imgUidCounter += 1
+          return {
+            _uid: _imgUidCounter,
+            base_url: m.base_url || '',
+            api_key: m.api_key || '',
+            model: m.model || '',
+            api_type: m.api_type || 'openai',
+            extra_url: m.extra_url || '',
+            max_retries: m.max_retries != null ? m.max_retries : 1,
+            weight: m.weight != null ? m.weight : 1,
+          }
+        })
         const vals = {
           name: g.name || '',
           description: g.description || '',
@@ -643,7 +650,7 @@ export default function ModelGroup() {
             <div className="space-y-4">
               {imageModels.map((m, idx) => (
                 <div
-                  key={idx}
+                  key={m._uid}
                   className="!rounded-2xl p-4"
                   style={{
                     border: imageModelsErrors[idx] ? '1px solid var(--semi-color-danger)' : '1px solid var(--semi-color-border)',

@@ -43,10 +43,10 @@ func Do(key string, fn func() (*Entry, error)) (val *Entry, err error) {
 		if r := recover(); r != nil {
 			c.err = fmt.Errorf("%w: %v", errPanic, r)
 		}
+		c.wg.Done()
 		flightMu.Lock()
 		delete(flights, key)
 		flightMu.Unlock()
-		c.wg.Done()
 		val = c.val
 		err = c.err
 	}()
@@ -189,7 +189,7 @@ func Get(key string) (*Entry, bool) {
 		atomic.AddInt64(&misses, 1)
 		return nil, false
 	}
-	atomic.AddInt64(&e.HitCount, 1)
+	e.HitCount++
 	s.moveToBackLocked(e)
 	atomic.AddInt64(&hits, 1)
 	return e, true
@@ -249,10 +249,11 @@ func putEntry(key string, e *Entry) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	e.Key = key
 	e.ExpiresAt = jitterExpiry(s.ttl)
 	if existing, ok := s.items[key]; ok {
 		if existing.element != nil {
-			s.order.Remove(existing.element)
+			s.removeElementLocked(existing.element)
 		}
 	}
 	e.element = s.order.PushBack(e)

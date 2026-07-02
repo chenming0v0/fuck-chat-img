@@ -13,6 +13,13 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+const (
+	maxRequestBodySize  = 10 * 1024 * 1024
+	maxResponseBodySize = 10 * 1024 * 1024
+	maxErrorBodySize    = 2 * 1024 * 1024
+	maxImageRespSize    = 1 * 1024 * 1024
+)
+
 // sharedHTTPClient 全局复用的 HTTP 客户端(连接池复用, 避免每次请求新建)
 // 注意: 包初始化时捕获 config.Get().RequestTimeout; 测试若改动超时需调用 resetHTTPClients.
 var sharedHTTPClient = newHTTPClient(config.Get().RequestTimeout)

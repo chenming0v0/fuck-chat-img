@@ -136,7 +136,7 @@ func ClearHistory(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"success": false, "message": "无权访问"})
 		return
 	}
-	if err := model.DB.Where("1 = 1").Delete(&model.History{}).Error; err != nil {
+	if err := model.DB.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&model.History{}).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": err.Error()})
 		return
 	}
@@ -155,64 +155,45 @@ func HistoryStats(c *gin.Context) {
 	}
 	isAdmin := isAdminContext(c)
 
-	baseScope := func() *gorm.DB {
-		q := model.DB.Session(&gorm.Session{}).Model(&model.History{})
-		if !isAdmin {
-			return q.Where("user_id = ?", userID)
-		}
-		return q
+	q := model.DB.Session(&gorm.Session{}).Model(&model.History{})
+	if !isAdmin {
+		q = q.Where("user_id = ?", userID)
 	}
 
-	var total, successCount, failCount, cacheHitCount, todayCount int64
-	if err := baseScope().Count(&total).Error; err != nil {
+	type statsRes struct {
+		Total       int64   `gorm:"column:total"`
+		Success     int64   `gorm:"column:success_count"`
+		Fail        int64   `gorm:"column:fail_count"`
+		CacheHit    int64   `gorm:"column:cache_hit_count"`
+		Today       int64   `gorm:"column:today_count"`
+		AvgLatency  float64 `gorm:"column:avg_latency"`
+		TotalTokens int64   `gorm:"column:total_tokens"`
+	}
+	var res statsRes
+	selectSQL := `
+		COUNT(*) as total,
+		COALESCE(SUM(CASE WHEN success THEN 1 ELSE 0 END), 0) as success_count,
+		COALESCE(SUM(CASE WHEN NOT success THEN 1 ELSE 0 END), 0) as fail_count,
+		COALESCE(SUM(CASE WHEN cache_hit THEN 1 ELSE 0 END), 0) as cache_hit_count,
+		COALESCE(SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END), 0) as today_count,
+		COALESCE(AVG(latency_ms), 0) as avg_latency,
+		COALESCE(SUM(total_tokens), 0) as total_tokens
+	`
+	if err := q.Select(selectSQL, today).Scan(&res).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": err.Error()})
 		return
 	}
-	if err := baseScope().Where("success = ?", true).Count(&successCount).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": err.Error()})
-		return
-	}
-	if err := baseScope().Where("success = ?", false).Count(&failCount).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": err.Error()})
-		return
-	}
-	if err := baseScope().Where("cache_hit = ?", true).Count(&cacheHitCount).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": err.Error()})
-		return
-	}
-	if err := baseScope().Where("created_at >= ?", today).Count(&todayCount).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": err.Error()})
-		return
-	}
-
-	var avgLatency float64
-	type avgRes struct{ Avg float64 }
-	var ar avgRes
-	if err := baseScope().Select("COALESCE(AVG(latency_ms),0) as avg").Scan(&ar).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": err.Error()})
-		return
-	}
-	avgLatency = ar.Avg
-
-	var totalTokens int64
-	type tokRes struct{ Sum int64 }
-	var tr tokRes
-	if err := baseScope().Select("COALESCE(SUM(total_tokens),0) as sum").Scan(&tr).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": err.Error()})
-		return
-	}
-	totalTokens = tr.Sum
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"data": gin.H{
-			"total":        total,
-			"success":      successCount,
-			"fail":         failCount,
-			"cache_hit":    cacheHitCount,
-			"today":        todayCount,
-			"avg_latency":  avgLatency,
-			"total_tokens": totalTokens,
+			"total":        res.Total,
+			"success":      res.Success,
+			"fail":         res.Fail,
+			"cache_hit":    res.CacheHit,
+			"today":        res.Today,
+			"avg_latency":  res.AvgLatency,
+			"total_tokens": res.TotalTokens,
 			"cache_stats":  cache.GetStats(),
 		},
 	})

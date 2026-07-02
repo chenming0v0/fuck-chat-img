@@ -26,6 +26,8 @@ const (
 	ProxyUserID uint = ^uint(0)
 )
 
+const jwtIssuer = "fuck-chat-img"
+
 // Claims JWT 载荷
 type Claims struct {
 	UserID       uint   `json:"uid"`
@@ -36,19 +38,22 @@ type Claims struct {
 }
 
 // GenerateToken 生成 JWT, 同时返回过期时间(供调用方与响应 expires_at 字段共用同一来源,
-// 避免响应字段与 JWT 实际 exp 各自调用 time.Now() 产生微小漂移, Low-10)
+// 避免响应字段与 JWT 实际 exp 各自调用 time.Now() 产生微小漂移)
 func GenerateToken(u *model.User) (string, time.Time, error) {
 	cfg := config.Get()
-	expiresAt := time.Now().Add(7 * 24 * time.Hour)
+	now := time.Now()
+	expiresAt := now.Add(7 * 24 * time.Hour)
 	claims := Claims{
 		UserID:       u.ID,
 		Username:     u.Username,
 		Role:         u.Role,
 		TokenVersion: u.TokenVersion,
 		RegisteredClaims: jwt.RegisteredClaims{
+			Subject:   fmt.Sprintf("%d", u.ID),
+			IssuedAt:  jwt.NewNumericDate(now),
+			NotBefore: jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(expiresAt),
-			IssuedAt:  jwt.NewNumericDate(time.Now()),
-			Issuer:    "fuck-chat-img",
+			Issuer:    jwtIssuer,
 		},
 	}
 	t := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
@@ -56,19 +61,21 @@ func GenerateToken(u *model.User) (string, time.Time, error) {
 	return s, expiresAt, err
 }
 
-// ParseToken 解析 JWT(仅做签名和过期校验, token_version 校验由 ValidateTokenVersion 负责)
+// ParseToken 解析 JWT(签名、过期、issuer校验, token_version 校验由 ValidateTokenVersion 负责)
 func ParseToken(tokenStr string) (*Claims, error) {
 	cfg := config.Get()
 	claims := &Claims{}
 	t, err := jwt.ParseWithClaims(tokenStr, claims, func(t *jwt.Token) (interface{}, error) {
-		// 安全: 必须使用 HS256, 防止算法混淆攻击
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
 		}
 		return []byte(cfg.JWTSecret), nil
-	})
+	}, jwt.WithValidMethods([]string{"HS256"}))
 	if err != nil || !t.Valid {
 		return nil, errors.New("invalid token")
+	}
+	if claims.Issuer != jwtIssuer {
+		return nil, errors.New("invalid token issuer")
 	}
 	return claims, nil
 }
@@ -97,7 +104,7 @@ func SetAuthCookie(c *gin.Context, token string, expiresAt time.Time) {
 		Path:     "/",
 		HttpOnly: true,
 		Secure:   secure,
-		SameSite: http.SameSiteLaxMode,
+		SameSite: http.SameSiteStrictMode,
 		Expires:  expiresAt,
 		MaxAge:   int(time.Until(expiresAt).Seconds()),
 	}
@@ -113,7 +120,7 @@ func ClearAuthCookie(c *gin.Context) {
 		Path:     "/",
 		HttpOnly: true,
 		Secure:   secure,
-		SameSite: http.SameSiteLaxMode,
+		SameSite: http.SameSiteStrictMode,
 		MaxAge:   -1,
 		Expires:  time.Unix(0, 0),
 	}
@@ -234,7 +241,6 @@ func MiddlewareProxyAuth() gin.HandlerFunc {
 		proxyKey := cfg.ProxyKey
 
 		var validClaims *Claims
-		var cookieCleared bool
 
 		cookieToken, cookieErr := c.Cookie(CookieName)
 		if cookieErr == nil && cookieToken != "" {
@@ -245,7 +251,6 @@ func MiddlewareProxyAuth() gin.HandlerFunc {
 				}
 			} else {
 				ClearAuthCookie(c)
-				cookieCleared = true
 			}
 		}
 
@@ -294,28 +299,15 @@ func MiddlewareProxyAuth() gin.HandlerFunc {
 		}
 
 		if proxyKey != "" {
-			pk := extractProxyKey(c)
-			if pk != "" && subtle.ConstantTimeCompare([]byte(pk), []byte(proxyKey)) == 1 {
-				c.Set(ContextKeyUserID, ProxyUserID)
-				c.Set(ContextKeyUsername, "__proxy__")
-				c.Set(ContextKeyRole, "proxy")
-				c.Set(ContextKeyAdmin, false)
-				c.Next()
-				return
-			}
-			if cookieCleared {
-				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-					"error": gin.H{"message": "token revoked", "type": "auth_error", "code": 401},
-				})
-				return
-			}
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-				"error": gin.H{"message": "invalid proxy key", "type": "auth_error", "code": 401},
+				"success": false,
+				"message": "authentication required",
 			})
 			return
 		}
 		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-			"error": gin.H{"message": "authentication required (configure FCI_PROXY_KEY or login as admin via Web UI)", "type": "auth_error", "code": 401},
+			"success": false,
+			"message": "authentication required (configure FCI_PROXY_KEY or login as admin via Web UI)",
 		})
 	}
 }

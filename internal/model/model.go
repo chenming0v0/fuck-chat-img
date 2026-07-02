@@ -52,7 +52,7 @@ type History struct {
 	RequestID       string    `gorm:"index;size:64" json:"request_id"`
 	ModelGroup      string    `gorm:"index;size:128" json:"model_group"`
 	Endpoint        string    `gorm:"size:32" json:"endpoint"` // responses | chat | messages
-	UserID          uint      `gorm:"index" json:"user_id"`      // 关联用户(0 表示代理匿名调用)
+	UserID          uint      `gorm:"index" json:"user_id"`      // 关联用户(ProxyUserID=MaxUint 表示代理密钥调用,0 表示异常值)
 	HasImage        bool      `json:"has_image"`
 	ImageCount      int       `json:"image_count"`
 	ImageModelUsed  string    `gorm:"size:256" json:"image_model_used"`

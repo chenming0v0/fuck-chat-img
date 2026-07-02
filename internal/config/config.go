@@ -12,14 +12,14 @@ import (
 )
 
 const (
-	// MinPasswordLength 全项目统一的密码最小长度(Setup / ChangePassword / initAdminFromEnv 共用)
-	MinPasswordLength = 6
-	// MaxPasswordLength 全项目统一的密码最大长度.
-	// bcrypt 会对超过 72 字节的密码静默截断只取前 72 字节, 两个前 72 位相同的长密码哈希一致,
-	// 削弱安全边际. 这里在入口处统一拒绝超长密码, 避免静默截断(Low-7).
-	MaxPasswordLength     = 72
+	MinPasswordLength = 8
+	MaxPasswordLength = 72
+	BcryptCost        = 12
+
 	defaultCacheMaxItems  = 10000
+	maxCacheMaxItems      = 1000000
 	defaultRequestTimeout = 300
+	maxRequestTimeout     = 3600
 )
 
 // Config 全局配置
@@ -92,10 +92,13 @@ func Load() {
 	if v := os.Getenv("FCI_LISTEN"); v != "" {
 		cfg.ListenAddr = v
 	}
+	if !strings.Contains(cfg.ListenAddr, ":") {
+		log.Printf("[fci] 警告: FCI_LISTEN=%s 格式无效，使用默认值 :8080", cfg.ListenAddr)
+		cfg.ListenAddr = ":8080"
+	}
 	if v := os.Getenv("FCI_DB_PATH"); v != "" {
 		cfg.DBPath = v
 	}
-	// FCI_WEB_DIR: 使用 LookupEnv 区分"未设置"(用默认嵌入)与"显式设为空"(强制用嵌入)
 	if v, ok := os.LookupEnv("FCI_WEB_DIR"); ok {
 		cfg.WebDir = v
 	}
@@ -106,7 +109,6 @@ func Load() {
 		cfg.AdminUser = v
 	}
 	if v := os.Getenv("FCI_ADMIN_PASS"); v != "" {
-		// 明文传入, 服务端在 initAdminFromEnv 中会 bcrypt 哈希后存储
 		cfg.InitAdminPass = v
 	}
 	if v := os.Getenv("FCI_PROXY_KEY"); v != "" {
@@ -125,6 +127,10 @@ func Load() {
 	}
 	if v := os.Getenv("FCI_CACHE_MAX"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			if n > maxCacheMaxItems {
+				log.Printf("[fci] 警告: FCI_CACHE_MAX=%d 超过上限 %d，使用上限值", n, maxCacheMaxItems)
+				n = maxCacheMaxItems
+			}
 			cfg.CacheMaxItems = n
 		} else {
 			log.Printf("[fci] 警告: FCI_CACHE_MAX=%s 无效，使用默认值 %d", v, defaultCacheMaxItems)
@@ -132,12 +138,18 @@ func Load() {
 	}
 	if v := os.Getenv("FCI_REQUEST_TIMEOUT"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			if n > maxRequestTimeout {
+				log.Printf("[fci] 警告: FCI_REQUEST_TIMEOUT=%d 超过上限 %d 秒，使用上限值", n, maxRequestTimeout)
+				n = maxRequestTimeout
+			}
 			cfg.RequestTimeout = n
 		} else {
 			log.Printf("[fci] 警告: FCI_REQUEST_TIMEOUT=%s 无效，使用默认值 %d", v, defaultRequestTimeout)
 		}
 	}
-	// 安全: 若未配置 JWT 密钥, 用 crypto/rand 生成随机密钥并警告(每次重启会变化, 导致旧 token 失效)
+	if cfg.InitAdminPass != "" && cfg.AdminUser == "root" {
+		log.Printf("[fci] 警告: 未设置 FCI_ADMIN_USER，使用默认用户名 'root'，建议修改为非默认用户名")
+	}
 	if cfg.JWTSecret == "" {
 		cfg.JWTSecret = randomSecret(32)
 		log.Printf("[fci] 警告: 未设置 FCI_JWT_SECRET, 已生成临时密钥。请配置 FCI_JWT_SECRET 环境变量以保持登录态稳定")

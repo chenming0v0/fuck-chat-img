@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/fuck-chat-img/fci/internal/cache"
+	"github.com/fuck-chat-img/fci/internal/config"
 	"github.com/fuck-chat-img/fci/internal/model"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -26,7 +28,7 @@ type chatRequest struct {
 }
 
 func HandleChat(c *gin.Context) {
-	bodyBytes, err := io.ReadAll(c.Request.Body)
+	bodyBytes, err := io.ReadAll(io.LimitReader(c.Request.Body, maxRequestBodySize))
 	if err != nil {
 		writeErr(c, http.StatusBadRequest, "read body: "+err.Error())
 		return
@@ -57,20 +59,23 @@ func HandleChat(c *gin.Context) {
 
 	if cache.Enabled() {
 		if e, ok := cache.Get(cacheKey); ok {
-			cache.RecordHit()
 			replayCacheEntry(c, e)
 			outSummary := cacheHitOutputSummary(e)
 			pt, ct := usageFromCacheEntry(e)
 			recordChatHistory(reqID, userID, grp, &req, e.HasImage, true, true, e.ImageModelUsed, grp.MainText.DisplayName(), e.ImageCount, pt, ct, time.Since(start), outSummary, "cache hit")
 			return
 		}
-		cache.RecordMiss()
 	}
 
 	hasImage, imgCount, imgModelUsed, modified, imgErr := processImagesForChatMessages(grp, req.Messages, c.Request.Context())
 	if imgErr != nil {
 		recordChatHistory(reqID, userID, grp, &req, hasImage, false, false, imgModelUsed, "", imgCount, 0, 0, time.Since(start), nil, imgErr.Error())
-		writeErr(c, http.StatusBadGateway, imgErr.Error())
+		var jsonErr *json.SyntaxError
+		if errors.As(imgErr, &jsonErr) || strings.HasPrefix(imgErr.Error(), "invalid messages json:") {
+			writeErr(c, http.StatusBadRequest, imgErr.Error())
+		} else {
+			writeErr(c, http.StatusBadGateway, imgErr.Error())
+		}
 		return
 	}
 	newBody := rebuildChatBody(req.raw, modified, grp)
@@ -88,21 +93,24 @@ func processImagesForChatMessages(g *modelGroupRuntime, messages json.RawMessage
 	}
 	var v interface{}
 	if err := json.Unmarshal(messages, &v); err != nil {
-		return false, 0, "", messages, nil
+		return false, 0, "", messages, fmt.Errorf("invalid messages json: %w", err)
 	}
 	cfg := defaultImgConfig(g)
 	newV, r := processImagesInValueCfg(g, v, cfg, ctx)
 	if r.err != nil {
-		return r.hasImage, r.imgCount, r.imgModel, messages, r.err
+		return r.hasImage, r.imgCount, pickImgModel(imgModelUsed, r.imgModel), messages, r.err
 	}
+	hasImage = r.hasImage
+	imgCount = r.imgCount
+	imgModelUsed = r.imgModel
 	if !r.modified {
-		return r.hasImage, r.imgCount, r.imgModel, messages, nil
+		return hasImage, imgCount, imgModelUsed, messages, nil
 	}
 	newBytes, mErr := json.Marshal(newV)
 	if mErr != nil {
-		return r.hasImage, r.imgCount, r.imgModel, messages, mErr
+		return hasImage, imgCount, imgModelUsed, messages, mErr
 	}
-	return r.hasImage, r.imgCount, r.imgModel, newBytes, nil
+	return hasImage, imgCount, imgModelUsed, newBytes, nil
 }
 
 func processImagesForMessages(g *modelGroupRuntime, messages json.RawMessage) (hasImage bool, imgCount int, imgModelUsed string, modified []byte, err error) {
@@ -112,14 +120,19 @@ func processImagesForMessages(g *modelGroupRuntime, messages json.RawMessage) (h
 func rebuildChatBody(raw json.RawMessage, newMessages []byte, g *modelGroupRuntime) []byte {
 	var obj map[string]interface{}
 	if err := json.Unmarshal(raw, &obj); err != nil {
+		log.Printf("rebuildChatBody: unmarshal raw failed: %v", err)
 		return raw
 	}
 	var m interface{}
-	_ = json.Unmarshal(newMessages, &m)
+	if err := json.Unmarshal(newMessages, &m); err != nil {
+		log.Printf("rebuildChatBody: unmarshal newMessages failed: %v", err)
+		return raw
+	}
 	obj["messages"] = m
 	obj["model"] = g.MainText.Model
 	b, err := json.Marshal(obj)
 	if err != nil {
+		log.Printf("rebuildChatBody: marshal failed: %v", err)
 		return raw
 	}
 	return b
@@ -138,7 +151,12 @@ func fetchChatNonStream(g *modelGroupRuntime, body []byte, ctx context.Context, 
 		return nil, err
 	}
 	defer resp.Body.Close()
-	respBytes, err := io.ReadAll(resp.Body)
+	var respBytes []byte
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBytes, err = io.ReadAll(io.LimitReader(resp.Body, maxErrorBodySize))
+	} else {
+		respBytes, err = io.ReadAll(resp.Body)
+	}
 	if err != nil {
 		log.Printf("read response body error: %v", err)
 		return nil, err
@@ -165,9 +183,12 @@ func fetchChatNonStream(g *modelGroupRuntime, body []byte, ctx context.Context, 
 func handleChatNonStream(c *gin.Context, g *modelGroupRuntime, body []byte, reqID string, userID uint, req *chatRequest, hasImage bool, imgCount int, imgModelUsed string, cacheKey string, start time.Time) {
 	var entry *cache.Entry
 	var fetchErr error
+	timeout := time.Duration(config.Get().RequestTimeout) * time.Second
 	if cache.Enabled() {
 		entry, fetchErr = cache.Do(cacheKey, func() (*cache.Entry, error) {
-			e, err := fetchChatNonStream(g, body, c.Request.Context(), hasImage, imgCount, imgModelUsed, cacheKey)
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			defer cancel()
+			e, err := fetchChatNonStream(g, body, ctx, hasImage, imgCount, imgModelUsed, cacheKey)
 			if err != nil {
 				return nil, err
 			}
@@ -175,7 +196,9 @@ func handleChatNonStream(c *gin.Context, g *modelGroupRuntime, body []byte, reqI
 			return e, nil
 		})
 	} else {
-		entry, fetchErr = fetchChatNonStream(g, body, c.Request.Context(), hasImage, imgCount, imgModelUsed, cacheKey)
+		ctx, cancel := context.WithTimeout(c.Request.Context(), timeout)
+		defer cancel()
+		entry, fetchErr = fetchChatNonStream(g, body, ctx, hasImage, imgCount, imgModelUsed, cacheKey)
 	}
 	if fetchErr != nil {
 		if ue, ok := fetchErr.(*upstreamError); ok {
@@ -188,7 +211,10 @@ func handleChatNonStream(c *gin.Context, g *modelGroupRuntime, body []byte, reqI
 		return
 	}
 	respBytes := entry.Value
-	pt, ct := extractUsage(respBytes)
+	pt, ct := extractUsageMessages(respBytes)
+	if pt == 0 && ct == 0 {
+		pt, ct = extractUsage(respBytes)
+	}
 	recordChatHistory(reqID, userID, g, req, hasImage, true, false, imgModelUsed, g.MainText.DisplayName(), imgCount, pt, ct, time.Since(start), respBytes, "")
 	c.Data(http.StatusOK, "application/json", respBytes)
 }
@@ -211,7 +237,7 @@ func handleChatStream(c *gin.Context, g *modelGroupRuntime, body []byte, reqID s
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		respBytes, err := io.ReadAll(resp.Body)
+		respBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodySize))
 		if err != nil {
 			log.Printf("read error response body error: %v", err)
 		}
@@ -227,6 +253,7 @@ func handleChatStream(c *gin.Context, g *modelGroupRuntime, body []byte, reqID s
 	var collected [][]byte
 	pt, ct := 0, 0
 	clientDisconnected := false
+	streamErr := false
 	reader := bufio.NewReaderSize(resp.Body, 64*1024)
 	for {
 		line, err := reader.ReadBytes('\n')
@@ -245,20 +272,30 @@ func handleChatStream(c *gin.Context, g *modelGroupRuntime, body []byte, reqID s
 			}
 		}
 		if err != nil {
+			if err != io.EOF {
+				streamErr = true
+				log.Printf("chat stream read error: %v", err)
+			}
 			break
 		}
 	}
 	if flusher != nil && !clientDisconnected {
 		flusher.Flush()
 	}
-	if cache.Enabled() && len(collected) > 0 && !clientDisconnected {
+	success := !clientDisconnected && !streamErr
+	if cache.Enabled() && len(collected) > 0 && success {
 		cache.PutStreamWithMeta(cacheKey, g.Name, collected, hasImage, imgCount, imgModelUsed)
 	}
 	var respBytes []byte
-	if !clientDisconnected {
+	var errMsg string
+	if success {
 		respBytes = bytes.Join(collected, nil)
+	} else if clientDisconnected {
+		errMsg = clientDisconnectedMsg(clientDisconnected)
+	} else if streamErr {
+		errMsg = "stream read error"
 	}
-	recordChatHistory(reqID, userID, g, req, hasImage, !clientDisconnected, false, imgModelUsed, g.MainText.DisplayName(), imgCount, pt, ct, time.Since(start), respBytes, clientDisconnectedMsg(clientDisconnected))
+	recordChatHistory(reqID, userID, g, req, hasImage, success, false, imgModelUsed, g.MainText.DisplayName(), imgCount, pt, ct, time.Since(start), respBytes, errMsg)
 }
 
 func HandleModels(c *gin.Context) {

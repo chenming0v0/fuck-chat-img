@@ -1,9 +1,12 @@
 package api
 
 import (
+	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -11,7 +14,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/fuck-chat-img/fci/internal/auth"
@@ -21,134 +23,145 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// maxProxyBodyBytes 代理请求体上限(32MiB). /v1/messages 等支持 base64 图片,
-// 请求体天然较大, 但仍需设上限防止内存耗尽 DoS.
 const maxProxyBodyBytes = 32 << 20
-
-// maxAPIBodyBytes 管理接口请求体上限(1MiB), 管理接口不处理图片, body 很小
 const maxAPIBodyBytes = 1 << 20
 
-// SetupRouter 装配路由
 func SetupRouter() *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Logger())
-	r.Use(gin.Recovery())
-	// 安全: 不信任任何 X-Forwarded-For / X-Real-IP 头(默认直连部署形态).
-	// 否则攻击者可伪造 XFF 头使 c.ClientIP() 返回任意 IP, 绕过 /api/login /api/setup
-	// 的速率限制. 反向代理部署时, 部署方应通过 SetTrustedProxies 显式列出可信代理 CIDR.
+	r.Use(customRecovery())
 	_ = r.SetTrustedProxies(nil)
-	// 安全: CORS 仅允许同源. 现代浏览器对同源 POST/PUT/DELETE 也会带 Origin 头,
-	// 因此不能只放行空 Origin——会误拒 SPA 自身的写请求. 这里:
-	//   - 空 Origin 放行(非浏览器客户端 / 同源 GET)
-	//   - 比对请求 Host 头, http(s)://<host> 形式视为同源
-	//   - 显式 Origin 通过 SetSameOriginHosts 白名单放行(部署方按需配置)
-	//   - 其余跨域拒绝
 	r.Use(corsMiddleware())
-	// 安全: 基础安全响应头
 	r.Use(func(c *gin.Context) {
 		c.Header("X-Content-Type-Options", "nosniff")
 		c.Header("X-Frame-Options", "DENY")
 		c.Header("Referrer-Policy", "strict-origin-when-cross-origin")
 		c.Next()
 	})
-	// 全局请求体大小限制: /v1/ 代理接口32MiB, /api/ 管理接口1MiB, 其他默认1MiB
 	r.Use(func(c *gin.Context) {
-		if strings.HasPrefix(c.Request.URL.Path, "/v1/") {
-			c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxProxyBodyBytes)
-		} else {
-			c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxAPIBodyBytes)
+		method := c.Request.Method
+		if method == http.MethodPost || method == http.MethodPut || method == http.MethodPatch || method == http.MethodDelete {
+			if strings.HasPrefix(c.Request.URL.Path, "/v1/") {
+				c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxProxyBodyBytes)
+			} else {
+				c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxAPIBodyBytes)
+			}
 		}
 		c.Next()
 	})
 
-	// ===== 公开接口(带速率限制, 防爆破/抢注轮询) =====
 	api := r.Group("/api")
 	api.GET("/status", Status)
 	api.POST("/login", rateLimit("login", 10, time.Minute), Login)
-	api.POST("/setup", rateLimit("setup", 10, time.Minute), Setup) // 首次设置管理员(仅在无任何用户时可用)
-	api.POST("/logout", Logout)                                    // 登出无需认证, 过期用户也可主动清Cookie
+	api.POST("/setup", rateLimit("setup", 10, time.Minute), Setup)
+	api.POST("/logout", Logout)
 
-	// ===== OpenAI 兼容代理接口 (使用模型组名作为访问凭证, /v1/models 需鉴权) =====
 	v1 := r.Group("/v1")
 	v1.Use(auth.MiddlewareProxyAuth())
 	v1.GET("/models", proxy.HandleModels)
+	v1.GET("/models/", proxy.HandleModels)
 	v1.POST("/responses", proxy.HandleResponses)
 	v1.POST("/chat/completions", proxy.HandleChat)
-	// Anthropic Claude 兼容代理
 	v1.POST("/messages", proxy.HandleMessages)
-	// 兼容别名
 	v1.POST("/responses/", proxy.HandleResponses)
 	v1.POST("/chat/completions/", proxy.HandleChat)
 	v1.POST("/messages/", proxy.HandleMessages)
 
-	// ===== 需登录的管理接口 =====
-	authed := api.Group("")
+	authed := r.Group("/api")
 	authed.Use(auth.MiddlewareAuth())
 	{
 		authed.GET("/user", UserInfo)
 		authed.POST("/user/password", ChangePassword)
 
-		// 模型组管理(普通用户只读, 管理员可写)
 		authed.GET("/groups", ListGroups)
 		authed.GET("/groups/:id", GetGroup)
-		// 明文 API Key 仅管理员可获取(用于编辑回填)
 		authed.GET("/groups/:id/plain", auth.MiddlewareAdmin(), GetGroupPlain)
 		authed.POST("/groups", auth.MiddlewareAdmin(), CreateGroup)
 		authed.PUT("/groups/:id", auth.MiddlewareAdmin(), UpdateGroup)
 		authed.DELETE("/groups/:id", auth.MiddlewareAdmin(), DeleteGroup)
 		authed.POST("/groups/:id/toggle", auth.MiddlewareAdmin(), ToggleGroup)
-		// 安全: TestGroup 返回的 group DTO 也含 Key, 必须管理员才能调
 		authed.GET("/groups/:id/test", auth.MiddlewareAdmin(), TestGroup)
 
-		// 历史记录(管理员可查看全部, 普通用户仅查看自己的)
 		authed.GET("/history", ListHistory)
 		authed.GET("/history/:id", GetHistory)
 		authed.DELETE("/history/:id", auth.MiddlewareAdmin(), DeleteHistory)
 		authed.DELETE("/history", auth.MiddlewareAdmin(), ClearHistory)
 		authed.GET("/history/stats", HistoryStats)
 
-		// 缓存
 		authed.GET("/cache/stats", CacheStats)
 		authed.DELETE("/cache", auth.MiddlewareAdmin(), CacheClear)
 	}
 
-	// ===== 前端静态资源 =====
 	registerWebStatic(r)
 
 	return r
 }
 
-// sameOriginHosts 运行期可被覆盖的同源白名单(默认为空, 仅靠请求 Host 推断)
-// 用 atomic.Pointer 做整体替换, 避免运行期配置变更与请求处理路径的数据竞争.
-var sameOriginHosts atomic.Pointer[[]string]
+var sameOriginHosts atomicP
 
-func hostsMatch(originHost, requestHost string) bool {
-	originHostname, _ := splitHostPort(originHost)
-	requestHostname, _ := splitHostPort(requestHost)
-	return originHostname == requestHostname
+type atomicP struct {
+	p *[]string
+	mu sync.RWMutex
 }
 
-func splitHostPort(hostport string) (string, string) {
-	if hostport == "" {
-		return "", ""
-	}
-	if i := strings.LastIndex(hostport, ":"); i != -1 && !strings.Contains(hostport[i+1:], "]") {
-		return hostport[:i], hostport[i+1:]
-	}
-	return hostport, ""
+func (a *atomicP) Load() *[]string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.p
 }
 
-// corsMiddleware 返回自定义 CORS 中间件, 能够访问请求 Host 头进行动态同源判断.
-// 这解决了 gin-contrib/cors 的 AllowOriginFunc 无法访问请求上下文的问题.
+func (a *atomicP) Store(p *[]string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.p = p
+}
+
+func hostsMatch(originURL *url.URL, requestHost string) bool {
+	originHostname, originPort, err := net.SplitHostPort(originURL.Host)
+	if err != nil {
+		originHostname = originURL.Host
+		originPort = ""
+	}
+	reqHostname, reqPort, err := net.SplitHostPort(requestHost)
+	if err != nil {
+		reqHostname = requestHost
+		reqPort = ""
+	}
+	if originHostname != reqHostname {
+		return false
+	}
+	originScheme := originURL.Scheme
+	reqScheme := "http"
+	if originPort == "" {
+		if originScheme == "https" {
+			originPort = "443"
+		} else {
+			originPort = "80"
+		}
+	}
+	if reqPort == "" {
+		if originScheme == "https" {
+			reqPort = "443"
+			reqScheme = "https"
+		} else {
+			reqPort = "80"
+		}
+	}
+	if originScheme != reqScheme {
+		return false
+	}
+	return originPort == reqPort
+}
+
 func corsMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		c.Header("Vary", "Origin")
 		origin := c.GetHeader("Origin")
 		if origin != "" {
-			c.Header("Vary", "Origin")
 			allow := false
-			if u, err := url.Parse(origin); err == nil {
-				if hostsMatch(u.Host, c.Request.Host) {
+			if u, err := url.Parse(origin); err == nil && u.Scheme != "" && u.Host != "" {
+				if hostsMatch(u, c.Request.Host) {
 					allow = true
 				} else {
 					p := sameOriginHosts.Load()
@@ -165,12 +178,16 @@ func corsMiddleware() gin.HandlerFunc {
 			if allow {
 				c.Header("Access-Control-Allow-Origin", origin)
 				c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-				c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, Cache-Control, X-Requested-With")
+				c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, Cache-Control")
 				c.Header("Access-Control-Expose-Headers", "Content-Length, Content-Type")
 				c.Header("Access-Control-Allow-Credentials", "true")
 			}
 		}
 		if c.Request.Method == http.MethodOptions {
+			if c.GetHeader("Origin") != "" && c.Writer.Header().Get("Access-Control-Allow-Origin") == "" {
+				c.AbortWithStatus(http.StatusForbidden)
+				return
+			}
 			c.AbortWithStatus(http.StatusNoContent)
 			return
 		}
@@ -178,15 +195,11 @@ func corsMiddleware() gin.HandlerFunc {
 	}
 }
 
-// SetSameOriginHosts 设置允许的显式 Origin 白名单(供部署方按需放开跨域)
-// 整体替换语义, 线程安全; 应在 r.Run 之前调用一次完成初始化.
 func SetSameOriginHosts(hosts []string) {
 	cp := append([]string(nil), hosts...)
 	sameOriginHosts.Store(&cp)
 }
 
-// rateLimit 简易每 IP 固定窗口速率限制中间件(无外部依赖).
-// limit 次 / window; 超限返回 429. 用于 /api/login /api/setup 防爆破与抢注轮询.
 func rateLimit(name string, limit int, window time.Duration) gin.HandlerFunc {
 	type bucket struct {
 		count   int
@@ -194,7 +207,7 @@ func rateLimit(name string, limit int, window time.Duration) gin.HandlerFunc {
 	}
 	var mu sync.Mutex
 	buckets := make(map[string]*bucket)
-	// 后台定期清理过期 bucket, 防止内存无限增长
+	done := make(chan struct{})
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -203,17 +216,23 @@ func rateLimit(name string, limit int, window time.Duration) gin.HandlerFunc {
 		}()
 		ticker := time.NewTicker(5 * time.Minute)
 		defer ticker.Stop()
-		for range ticker.C {
-			mu.Lock()
-			now := time.Now()
-			for k, b := range buckets {
-				if now.After(b.resetAt) {
-					delete(buckets, k)
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				mu.Lock()
+				now := time.Now()
+				for k, b := range buckets {
+					if now.After(b.resetAt) {
+						delete(buckets, k)
+					}
 				}
+				mu.Unlock()
 			}
-			mu.Unlock()
 		}
 	}()
+	_ = done
 	return func(c *gin.Context) {
 		ip := c.ClientIP()
 		key := name + ":" + ip
@@ -238,30 +257,40 @@ func rateLimit(name string, limit int, window time.Duration) gin.HandlerFunc {
 	}
 }
 
-// registerWebStatic 注册前端 SPA(支持 history 路由回退到 index.html)
-// 优先使用磁盘 WebDir(便于开发热替换), 否则使用嵌入的 DistFS
+func customRecovery() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		defer func() {
+			if err := recover(); err != nil {
+				log.Printf("[fci] panic recovered: %v", err)
+				c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{
+					"success": false,
+					"message": "服务器内部错误",
+				})
+			}
+		}()
+		c.Next()
+	}
+}
+
 func registerWebStatic(r *gin.Engine) {
 	cfg := config.Get()
 	var rootFS fs.FS
 	if cfg.WebDir != "" {
-		if _, err := os.Stat(filepath.Join(cfg.WebDir, "index.html")); err == nil {
+		indexPath := filepath.Join(cfg.WebDir, "index.html")
+		if _, err := os.Stat(indexPath); err == nil {
 			rootFS = os.DirFS(cfg.WebDir)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			log.Printf("[fci] warn: stat WebDir index.html failed: %v", err)
 		}
 	}
 	if rootFS == nil {
-		// 使用嵌入的前端产物
 		emb, err := fs.Sub(web.DistFS, "dist")
-		if err == nil {
-			rootFS = emb
-		}
-	}
-
-	// 预读 index.html 用于 SPA 回退(避免 http.FileServer 的 301 重定向)
-	var indexBytes []byte
-	if rootFS != nil {
-		if f, err := rootFS.Open("index.html"); err == nil {
-			indexBytes, _ = io.ReadAll(f)
-			f.Close()
+		if err != nil {
+			log.Printf("[fci] warn: embedded dist FS not available: %v", err)
+		} else {
+			if _, err := fs.Stat(emb, "index.html"); err == nil {
+				rootFS = emb
+			}
 		}
 	}
 
@@ -290,41 +319,57 @@ func registerWebStatic(r *gin.Engine) {
 			c.Status(http.StatusNotFound)
 			return
 		}
+		if !fs.ValidPath(cleaned) {
+			c.Status(http.StatusNotFound)
+			return
+		}
 		serveStaticFile(c, rootFS, cleaned)
 	})
 
-	// 根路径 → index.html
 	r.GET("/", func(c *gin.Context) {
-		serveIndex(c, indexBytes)
+		serveIndex(c, rootFS)
 	})
 
 	r.NoRoute(func(c *gin.Context) {
 		p := c.Request.URL.Path
 		if strings.HasPrefix(p, "/api/") || p == "/api" {
-			c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "not found", "type": "not_found"}})
+			c.JSON(http.StatusNotFound, gin.H{"success": false, "message": "not found"})
 			return
 		}
 		if strings.HasPrefix(p, "/v1/") || p == "/v1" {
-			c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "not found", "type": "not_found"}})
+			c.JSON(http.StatusNotFound, gin.H{"success": false, "message": "not found"})
 			return
 		}
 		if strings.HasPrefix(p, "/static/") || p == "/static" {
 			c.Status(http.StatusNotFound)
 			return
 		}
-		serveIndex(c, indexBytes)
+		serveIndex(c, rootFS)
 	})
 }
 
-func serveIndex(c *gin.Context, indexBytes []byte) {
-	if len(indexBytes) == 0 {
+func serveIndex(c *gin.Context, rootFS fs.FS) {
+	if rootFS == nil {
 		c.String(http.StatusOK, "fuck-chat-img backend is running. Web UI not built. Run `cd web && bun run build` then rebuild.")
 		return
 	}
-	c.Data(http.StatusOK, "text/html; charset=utf-8", indexBytes)
+	f, err := rootFS.Open("index.html")
+	if err != nil {
+		log.Printf("[fci] warn: open index.html failed: %v", err)
+		c.String(http.StatusOK, "fuck-chat-img backend is running. Web UI not built. Run `cd web && bun run build` then rebuild.")
+		return
+	}
+	defer f.Close()
+	data, err := io.ReadAll(f)
+	if err != nil {
+		log.Printf("[fci] warn: read index.html failed: %v", err)
+		c.String(http.StatusOK, "fuck-chat-img backend is running. Web UI not built. Run `cd web && bun run build` then rebuild.")
+		return
+	}
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.Data(http.StatusOK, "text/html; charset=utf-8", data)
 }
 
-// serveStaticFile 从 FS 读取并写入静态文件(带 Content-Type 推断与缓存头)
 func serveStaticFile(c *gin.Context, rootFS fs.FS, p string) {
 	f, err := rootFS.Open(p)
 	if err != nil {
@@ -337,16 +382,28 @@ func serveStaticFile(c *gin.Context, rootFS fs.FS, p string) {
 		c.Status(http.StatusNotFound)
 		return
 	}
-	data, err := io.ReadAll(f)
+	data, err := io.ReadAll(io.LimitReader(f, 50<<20))
 	if err != nil {
+		log.Printf("[fci] warn: read static file %s failed: %v", p, err)
 		c.Status(http.StatusInternalServerError)
 		return
 	}
-	// 静态资源(带 hash 文件名的 JS/CSS)长期缓存, 其他文件不缓存
-	if strings.HasSuffix(p, ".js") || strings.HasSuffix(p, ".css") || strings.HasSuffix(p, ".woff2") || strings.HasSuffix(p, ".woff") {
+	ext := path.Ext(p)
+	if isHashedAsset(ext) {
 		c.Header("Cache-Control", "public, max-age=31536000, immutable")
+	} else {
+		c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
 	}
 	c.Data(http.StatusOK, contentTypeFor(p), data)
+}
+
+func isHashedAsset(ext string) bool {
+	switch ext {
+	case ".js", ".css", ".woff2", ".woff", ".ttf", ".eot", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico":
+		return true
+	default:
+		return false
+	}
 }
 
 func contentTypeFor(p string) string {
@@ -363,11 +420,47 @@ func contentTypeFor(p string) string {
 		return "image/svg+xml"
 	case strings.HasSuffix(p, ".png"):
 		return "image/png"
+	case strings.HasSuffix(p, ".jpg"), strings.HasSuffix(p, ".jpeg"):
+		return "image/jpeg"
+	case strings.HasSuffix(p, ".gif"):
+		return "image/gif"
+	case strings.HasSuffix(p, ".webp"):
+		return "image/webp"
+	case strings.HasSuffix(p, ".ico"):
+		return "image/x-icon"
 	case strings.HasSuffix(p, ".woff2"):
 		return "font/woff2"
 	case strings.HasSuffix(p, ".woff"):
 		return "font/woff"
+	case strings.HasSuffix(p, ".ttf"):
+		return "font/ttf"
+	case strings.HasSuffix(p, ".eot"):
+		return "application/vnd.ms-fontobject"
 	default:
+		ct := mimeFromExt(path.Ext(p))
+		if ct != "" {
+			return ct
+		}
 		return "application/octet-stream"
 	}
+}
+
+func mimeFromExt(ext string) string {
+	m := map[string]string{
+		".mp3": "audio/mpeg",
+		".mp4": "video/mp4",
+		".webm": "video/webm",
+		".pdf": "application/pdf",
+	}
+	if ct, ok := m[ext]; ok {
+		return ct
+	}
+	return ""
+}
+
+func aborterrf(c *gin.Context, code int, msg string, err error) {
+	if err != nil {
+		log.Printf("[fci] %s: %v", msg, err)
+	}
+	c.AbortWithStatusJSON(code, gin.H{"success": false, "message": fmt.Sprintf("%s: %v", msg, err)})
 }

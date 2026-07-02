@@ -63,7 +63,9 @@ var outputAffectingKeys = []string{
 	"logit_bias",
 	"logprobs",
 	"top_logprobs",
-	// 以下字段依赖上游服务端状态或显著影响输出, 必须纳入缓存键
+	"modalities",
+	"audio",
+	"prediction",
 	"instructions",
 	"previous_response_id",
 	"prompt_cache_key",
@@ -108,11 +110,6 @@ func normalizeForCache(raw json.RawMessage) []byte {
 		return raw
 	}
 	return b
-}
-
-// normalizeResponsesInput 规范化 Responses API 的 input 字段(保留旧名以兼容调用方)
-func normalizeResponsesInput(input json.RawMessage) []byte {
-	return normalizeForCache(input)
 }
 
 // normalizeMessagesInput 规范化 Chat / Messages API 的 messages 字段
@@ -188,7 +185,7 @@ func canonicalizeValue(v interface{}) interface{} {
 // isVolatileKey 判断是否为易变字段(不应纳入缓存键)
 func isVolatileKey(k string) bool {
 	switch k {
-	case "id", "created_at", "timestamp", "updated_at":
+	case "id", "created", "created_at", "timestamp", "updated_at":
 		return true
 	}
 	return false

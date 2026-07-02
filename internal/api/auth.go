@@ -9,7 +9,12 @@ import (
 	"github.com/fuck-chat-img/fci/internal/config"
 	"github.com/fuck-chat-img/fci/internal/model"
 	"github.com/gin-gonic/gin"
+	"golang.org/x/crypto/bcrypt"
 )
+
+func bcryptCompare(hash, password string) error {
+	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
+}
 
 // Login 登录
 func Login(c *gin.Context) {
@@ -62,7 +67,10 @@ func UserInfo(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "未登录"})
 		return
 	}
-	role, _ := c.Get(auth.ContextKeyRole)
+	role, ok := c.Get(auth.ContextKeyRole)
+	if !ok {
+		role = "user"
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"data": gin.H{
@@ -88,8 +96,13 @@ func ChangePassword(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "未登录"})
 		return
 	}
-	if _, ok := model.VerifyPasswordByID(uid, req.OldPassword); !ok {
+	u, ok := model.VerifyPasswordByID(uid, req.OldPassword)
+	if !ok {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "原密码错误"})
+		return
+	}
+	if err := bcryptCompare(u.PasswordHash, req.NewPassword); err == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "新密码不能与原密码相同"})
 		return
 	}
 	if err := config.ValidatePasswordStrength(req.NewPassword); err != nil {
@@ -100,14 +113,17 @@ func ChangePassword(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": err.Error()})
 		return
 	}
-	// 密码修改后token_version已递增, 重新加载用户签发新token(否则旧Cookie因version失效立即登出)
 	freshUser, err := model.GetUserByID(uid)
-	if err == nil {
-		token, expiresAt, genErr := auth.GenerateToken(freshUser)
-		if genErr == nil {
-			auth.SetAuthCookie(c, token, expiresAt)
-		}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "重新加载用户失败，请重新登录"})
+		return
 	}
+	token, expiresAt, genErr := auth.GenerateToken(freshUser)
+	if genErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "生成新令牌失败，请重新登录"})
+		return
+	}
+	auth.SetAuthCookie(c, token, expiresAt)
 	c.JSON(http.StatusOK, gin.H{"success": true, "message": "密码已修改"})
 }
 
