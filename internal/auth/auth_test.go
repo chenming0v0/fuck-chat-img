@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -200,8 +202,8 @@ func TestSetAndClearAuthCookie(t *testing.T) {
 	if !cookie.HttpOnly {
 		t.Error("cookie should be HttpOnly")
 	}
-	if cookie.SameSite != http.SameSiteLaxMode {
-		t.Errorf("expected SameSite Lax, got %v", cookie.SameSite)
+	if cookie.SameSite != http.SameSiteStrictMode {
+		t.Errorf("expected SameSite Strict, got %v", cookie.SameSite)
 	}
 	if cookie.Path != "/" {
 		t.Errorf("expected path /, got %s", cookie.Path)
@@ -529,7 +531,11 @@ func TestNoneAlgorithmTokenRejected(t *testing.T) {
 func TestNonHMACAlgorithmTokenRejected(t *testing.T) {
 	setupTestConfig(t)
 
-	rsaKey := []byte("-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Qu\nKUpRKfFLfRYC9AIKjbJTWit+CqvjWYzvQwECAwEAAQJAIJLixBy2qpFoS4DSmoEm\no3qGy0t6z09AIJtH+5OeRV1be+N4cDYJKffGzDa88vQENZiRm0GRq6a+HPGQMd2k\nTQIhAKMSvzIBnni7ot/OSie2TmJLY4SwTQAevXysE2RbFDYdAiEBCUEaRQnMnbp7\n9mxDXDf6AU0cN/RPBjb9qSHDcWZHGzUCIG2Es59z8ugGrDY+pxLQnwfotadxd+Uy\nv/Ow5T0q5gIJAiEAyS4RaI9YG8EWx/2w0T67ZUVAw8eOMB6BIUg0Xcu+3okCIBOs\n/5OiPgoTdSy7bcF9IGpSE8ZgGKzgYQVZeN97YE00\n-----END RSA PRIVATE KEY-----")
+	// 生成一个真正的 RSA 密钥用于签名 RS256 token, 验证 ParseToken 会拒绝非 HMAC 算法
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("failed to generate RSA key: %v", err)
+	}
 
 	claims := Claims{
 		UserID:   1,
@@ -542,8 +548,7 @@ func TestNonHMACAlgorithmTokenRejected(t *testing.T) {
 	tok := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
 	rsaToken, err := tok.SignedString(rsaKey)
 	if err != nil {
-		t.Skip("RSA signing skipped (invalid test key)")
-		return
+		t.Fatalf("RSA signing failed: %v", err)
 	}
 
 	_, err = ParseToken(rsaToken)
@@ -753,6 +758,14 @@ func TestVerifyPasswordTimingAttack(t *testing.T) {
 		t.Error("wrong password should fail")
 	}
 
+	// 两条路径都应执行 bcrypt(cost 12) 比对, 耗时应在同一量级(均 >= 10ms).
+	// 用绝对下限断言"确实执行了 bcrypt", 用相对比值断言"两条路径耗时相近".
+	if elapsed1 < 10*time.Millisecond {
+		t.Errorf("nonexistent user path too fast (%v), dummy bcrypt may not have run", elapsed1)
+	}
+	if elapsed2 < 10*time.Millisecond {
+		t.Errorf("wrong password path too fast (%v), bcrypt may not have run", elapsed2)
+	}
 	ratio := float64(elapsed2) / float64(elapsed1+1)
 	t.Logf("Timing: nonexistent=%v, wrongpass=%v, ratio=%.2f", elapsed1, elapsed2, ratio)
 }

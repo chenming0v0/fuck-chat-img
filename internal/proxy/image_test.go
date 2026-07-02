@@ -421,6 +421,11 @@ func TestCacheHit_SameImageDifferentFormats(t *testing.T) {
 		t.Errorf("相同图片不同格式应产生相同缓存键(用户强调: 缓存要做好):\n  key1=%s\n  key2=%s", key1, key2)
 	}
 
+	// 图片识别阶段不应触及主对话模型(仅 processImagesForMessages)
+	if upstreamCalls != 0 {
+		t.Errorf("图片处理阶段不应调用主对话模型, 实际调用 %d 次", upstreamCalls)
+	}
+
 	// 写入缓存后第二次应命中
 	cache.Init()
 	cache.PutWithMeta(key1, groupName, []byte(`{"cached":true}`), false, 0, "")

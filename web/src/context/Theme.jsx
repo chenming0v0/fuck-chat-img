@@ -3,7 +3,7 @@ import React, { createContext, useContext, useEffect, useState } from 'react'
 const ThemeContext = createContext(null)
 
 // 主题上下文：light / dark
-// dark：html 加 .dark class，body 加 theme-mode="dark"
+// dark：html 加 .dark class + theme-mode="dark"(Semi UI CSS 变量也挂在此)
 export function ThemeProvider({ children }) {
   const [theme, setTheme] = useState(
     () => localStorage.getItem('fci_theme') || 'light',
@@ -11,13 +11,12 @@ export function ThemeProvider({ children }) {
 
   useEffect(() => {
     const html = document.documentElement
-    const body = document.body
     if (theme === 'dark') {
       html.classList.add('dark')
-      body.setAttribute('theme-mode', 'dark')
+      html.setAttribute('theme-mode', 'dark')
     } else {
       html.classList.remove('dark')
-      body.removeAttribute('theme-mode')
+      html.removeAttribute('theme-mode')
     }
     localStorage.setItem('fci_theme', theme)
   }, [theme])

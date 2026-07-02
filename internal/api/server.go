@@ -2,7 +2,6 @@ package api
 
 import (
 	"errors"
-	"fmt"
 	"io"
 	"io/fs"
 	"log"
@@ -31,7 +30,9 @@ func SetupRouter() *gin.Engine {
 	r := gin.New()
 	r.Use(gin.Logger())
 	r.Use(customRecovery())
-	_ = r.SetTrustedProxies(nil)
+	// 显式传入空切片: 不信任任何代理, c.ClientIP() 直接返回 RemoteAddr.
+	// 避免攻击者伪造 X-Forwarded-For 绕过 rateLimit 的每 IP 限流.
+	_ = r.SetTrustedProxies([]string{})
 	r.Use(corsMiddleware())
 	r.Use(func(c *gin.Context) {
 		c.Header("X-Content-Type-Options", "nosniff")
@@ -117,7 +118,9 @@ func (a *atomicP) Store(p *[]string) {
 	a.p = p
 }
 
-func hostsMatch(originURL *url.URL, requestHost string) bool {
+// hostsMatch 判断 Origin 是否与请求同源(同 host + 同 port + 同 scheme)
+// 请求 scheme 由 c.Request.TLS 决定, 不从 Origin 头推断, 避免跨 scheme 同源误判.
+func hostsMatch(originURL *url.URL, requestHost string, requestTLS bool) bool {
 	originHostname, originPort, err := net.SplitHostPort(originURL.Host)
 	if err != nil {
 		originHostname = originURL.Host
@@ -133,6 +136,9 @@ func hostsMatch(originURL *url.URL, requestHost string) bool {
 	}
 	originScheme := originURL.Scheme
 	reqScheme := "http"
+	if requestTLS {
+		reqScheme = "https"
+	}
 	if originPort == "" {
 		if originScheme == "https" {
 			originPort = "443"
@@ -141,9 +147,8 @@ func hostsMatch(originURL *url.URL, requestHost string) bool {
 		}
 	}
 	if reqPort == "" {
-		if originScheme == "https" {
+		if reqScheme == "https" {
 			reqPort = "443"
-			reqScheme = "https"
 		} else {
 			reqPort = "80"
 		}
@@ -161,7 +166,7 @@ func corsMiddleware() gin.HandlerFunc {
 		if origin != "" {
 			allow := false
 			if u, err := url.Parse(origin); err == nil && u.Scheme != "" && u.Host != "" {
-				if hostsMatch(u, c.Request.Host) {
+				if hostsMatch(u, c.Request.Host, c.Request.TLS != nil) {
 					allow = true
 				} else {
 					p := sameOriginHosts.Load()
@@ -207,32 +212,6 @@ func rateLimit(name string, limit int, window time.Duration) gin.HandlerFunc {
 	}
 	var mu sync.Mutex
 	buckets := make(map[string]*bucket)
-	done := make(chan struct{})
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				log.Printf("[fci] rate-limit cleanup goroutine panic: %v", r)
-			}
-		}()
-		ticker := time.NewTicker(5 * time.Minute)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-done:
-				return
-			case <-ticker.C:
-				mu.Lock()
-				now := time.Now()
-				for k, b := range buckets {
-					if now.After(b.resetAt) {
-						delete(buckets, k)
-					}
-				}
-				mu.Unlock()
-			}
-		}
-	}()
-	_ = done
 	return func(c *gin.Context) {
 		ip := c.ClientIP()
 		key := name + ":" + ip
@@ -245,6 +224,14 @@ func rateLimit(name string, limit int, window time.Duration) gin.HandlerFunc {
 		}
 		b.count++
 		allowed := b.count <= limit
+		// 惰性清理过期桶: 桶数过多时顺带清理, 避免内存无限增长(替代独立清理协程).
+		if len(buckets) > 10000 {
+			for k, bb := range buckets {
+				if now.After(bb.resetAt) {
+					delete(buckets, k)
+				}
+			}
+		}
 		mu.Unlock()
 		if !allowed {
 			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
@@ -360,7 +347,7 @@ func serveIndex(c *gin.Context, rootFS fs.FS) {
 		return
 	}
 	defer f.Close()
-	data, err := io.ReadAll(f)
+	data, err := io.ReadAll(io.LimitReader(f, 1<<20))
 	if err != nil {
 		log.Printf("[fci] warn: read index.html failed: %v", err)
 		c.String(http.StatusOK, "fuck-chat-img backend is running. Web UI not built. Run `cd web && bun run build` then rebuild.")
@@ -389,7 +376,7 @@ func serveStaticFile(c *gin.Context, rootFS fs.FS, p string) {
 		return
 	}
 	ext := path.Ext(p)
-	if isHashedAsset(ext) {
+	if isHashedAsset(p, ext) {
 		c.Header("Cache-Control", "public, max-age=31536000, immutable")
 	} else {
 		c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
@@ -397,47 +384,71 @@ func serveStaticFile(c *gin.Context, rootFS fs.FS, p string) {
 	c.Data(http.StatusOK, contentTypeFor(p), data)
 }
 
-func isHashedAsset(ext string) bool {
-	switch ext {
-	case ".js", ".css", ".woff2", ".woff", ".ttf", ".eot", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico":
-		return true
-	default:
+// hashedAssetExt 可享受长缓存的资源扩展名(rsbuild 默认对这类文件加内容哈希)
+var hashedAssetExt = map[string]bool{
+	".js": true, ".css": true, ".woff2": true, ".woff": true, ".ttf": true, ".eot": true,
+	".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".webp": true, ".svg": true,
+}
+
+// isHashedAsset 判断静态资源是否可设为 immutable 长缓存.
+// 仅当扩展名属于已知 hashed 资源类型, 且文件名含内容哈希段(如 index.a1b2c3d4.js)时才返回 true;
+// 否则回落到 no-cache, 避免非哈希资源(如 favicon.ico)被原地更新后浏览器仍命中旧缓存.
+func isHashedAsset(p, ext string) bool {
+	if !hashedAssetExt[ext] {
 		return false
 	}
+	base := path.Base(p)
+	// 去掉扩展名后检查是否含 8 位以上十六进制哈希段(常见形式: name.[hash].ext 或 name-[hash].ext)
+	stem := strings.TrimSuffix(base, ext)
+	idx := strings.LastIndexAny(stem, ".-")
+	if idx < 0 || idx == len(stem)-1 {
+		return false
+	}
+	tail := stem[idx+1:]
+	if len(tail) < 8 {
+		return false
+	}
+	for _, c := range tail {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
 }
 
 func contentTypeFor(p string) string {
-	switch {
-	case strings.HasSuffix(p, ".js"):
+	ext := strings.ToLower(path.Ext(p))
+	switch ext {
+	case ".js":
 		return "application/javascript; charset=utf-8"
-	case strings.HasSuffix(p, ".css"):
+	case ".css":
 		return "text/css; charset=utf-8"
-	case strings.HasSuffix(p, ".html"):
+	case ".html":
 		return "text/html; charset=utf-8"
-	case strings.HasSuffix(p, ".json"):
+	case ".json":
 		return "application/json; charset=utf-8"
-	case strings.HasSuffix(p, ".svg"):
+	case ".svg":
 		return "image/svg+xml"
-	case strings.HasSuffix(p, ".png"):
+	case ".png":
 		return "image/png"
-	case strings.HasSuffix(p, ".jpg"), strings.HasSuffix(p, ".jpeg"):
+	case ".jpg", ".jpeg":
 		return "image/jpeg"
-	case strings.HasSuffix(p, ".gif"):
+	case ".gif":
 		return "image/gif"
-	case strings.HasSuffix(p, ".webp"):
+	case ".webp":
 		return "image/webp"
-	case strings.HasSuffix(p, ".ico"):
+	case ".ico":
 		return "image/x-icon"
-	case strings.HasSuffix(p, ".woff2"):
+	case ".woff2":
 		return "font/woff2"
-	case strings.HasSuffix(p, ".woff"):
+	case ".woff":
 		return "font/woff"
-	case strings.HasSuffix(p, ".ttf"):
+	case ".ttf":
 		return "font/ttf"
-	case strings.HasSuffix(p, ".eot"):
+	case ".eot":
 		return "application/vnd.ms-fontobject"
 	default:
-		ct := mimeFromExt(path.Ext(p))
+		ct := mimeFromExt(ext)
 		if ct != "" {
 			return ct
 		}
@@ -456,11 +467,4 @@ func mimeFromExt(ext string) string {
 		return ct
 	}
 	return ""
-}
-
-func aborterrf(c *gin.Context, code int, msg string, err error) {
-	if err != nil {
-		log.Printf("[fci] %s: %v", msg, err)
-	}
-	c.AbortWithStatusJSON(code, gin.H{"success": false, "message": fmt.Sprintf("%s: %v", msg, err)})
 }

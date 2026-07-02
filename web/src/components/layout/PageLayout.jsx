@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { Layout } from '@douyinfe/semi-ui'
 import { Outlet } from 'react-router-dom'
 import HeaderBar from './HeaderBar'
@@ -11,12 +11,21 @@ const { Header, Sider, Content } = Layout
 export default function PageLayout() {
   const [collapsed, setCollapsed] = useState(false)
 
-  function toggleCollapsed() {
-    const next = !collapsed
-    setCollapsed(next)
+  // 用 useEffect 同步 body class 并在卸载时清理: 避免跳转到 /login 等非 console
+  // 路由后 body 仍残留 sidebar-collapsed 类, 导致下次进入控制台时样式错位.
+  useEffect(() => {
     if (typeof document !== 'undefined') {
-      document.body.classList.toggle('sidebar-collapsed', next)
+      document.body.classList.toggle('sidebar-collapsed', collapsed)
     }
+    return () => {
+      if (typeof document !== 'undefined') {
+        document.body.classList.remove('sidebar-collapsed')
+      }
+    }
+  }, [collapsed])
+
+  function toggleCollapsed() {
+    setCollapsed((prev) => !prev)
   }
 
   return (

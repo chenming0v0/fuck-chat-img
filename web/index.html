@@ -9,6 +9,20 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#ffffff" />
     <title>Fuck Chat Img</title>
+    <script>
+      // 首屏前同步应用主题, 避免 dark 主题用户刷新时先看到一帧 light 主题(FOUC)
+      // 同时设置 html.dark(Tailwind/自定义CSS) 和 html[theme-mode](Semi UI CSS 变量),
+      // 否则 Semi UI 组件仍会闪一帧亮色
+      (function () {
+        try {
+          var t = localStorage.getItem('fci_theme');
+          if (t === 'dark') {
+            document.documentElement.classList.add('dark');
+            document.documentElement.setAttribute('theme-mode', 'dark');
+          }
+        } catch (e) {}
+      })();
+    </script>
   </head>
   <body>
     <noscript>需要启用 JavaScript 才能运行本应用。</noscript>

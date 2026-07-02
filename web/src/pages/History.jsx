@@ -36,7 +36,6 @@ export default function History() {
   // 搜索防抖: keywordInput 即时, keyword 防抖后用于请求, 防每键一请求与过期响应覆盖
   const [keywordInput, setKeywordInput] = useState('')
   const [keyword, setKeyword] = useState('')
-  const [group, setGroup] = useState(undefined)
   const [successFilter, setSuccessFilter] = useState(undefined)
   const [cacheHitFilter, setCacheHitFilter] = useState(undefined)
   const [stats, setStats] = useState(null)
@@ -65,7 +64,6 @@ export default function History() {
         p: page,
         size,
         keyword: keyword || undefined,
-        group: group || undefined,
         success:
           successFilter === undefined ? undefined : successFilter ? 'true' : 'false',
         cache_hit:
@@ -114,7 +112,7 @@ export default function History() {
   useEffect(() => {
     refresh()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, size, group, successFilter, cacheHitFilter, keyword])
+  }, [page, size, successFilter, cacheHitFilter, keyword])
 
   useEffect(() => {
     refreshStats()
@@ -153,7 +151,12 @@ export default function History() {
           const res = await deleteHistory(row.id)
           if (res?.success) {
             Toast.success('已删除')
-            refresh()
+            // 删除当前页最后一条且非第 1 页时回退页码, 避免停留在空表格
+            if (data.length === 1 && page > 1) {
+              setPage(page - 1)
+            } else {
+              refresh()
+            }
             refreshStats()
           } else {
             Toast.error(res?.message || '删除失败')

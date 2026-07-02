@@ -104,6 +104,9 @@ func Load() {
 	}
 	if v := os.Getenv("FCI_JWT_SECRET"); v != "" {
 		cfg.JWTSecret = v
+		if len(v) < 32 {
+			log.Printf("[fci] 警告: FCI_JWT_SECRET 长度仅 %d 字节, 建议至少 32 字节(用 openssl rand -hex 32 生成), 弱密钥可能被离线爆破", len(v))
+		}
 	}
 	if v := os.Getenv("FCI_ADMIN_USER"); v != "" {
 		cfg.AdminUser = v

@@ -217,7 +217,7 @@ func fetchMessagesNonStream(g *modelGroupRuntime, body []byte, ctx context.Conte
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		respBytes, err = io.ReadAll(io.LimitReader(resp.Body, maxErrorBodySize))
 	} else {
-		respBytes, err = io.ReadAll(resp.Body)
+		respBytes, err = io.ReadAll(io.LimitReader(resp.Body, maxResponseBodySize))
 	}
 	if err != nil {
 		log.Printf("read response body error: %v", err)
@@ -315,6 +315,7 @@ func handleMessagesStream(c *gin.Context, g *modelGroupRuntime, body []byte, req
 	flusher, _ := c.Writer.(http.Flusher)
 
 	var collected [][]byte
+	var collectedBytes int
 	var pt, ct int
 	clientDisconnected := false
 	streamErr := false
@@ -330,7 +331,10 @@ func handleMessagesStream(c *gin.Context, g *modelGroupRuntime, body []byte, req
 				clientDisconnected = true
 				break
 			}
-			collected = append(collected, line)
+			if collectedBytes+len(line) <= maxResponseBodySize {
+				collected = append(collected, line)
+				collectedBytes += len(line)
+			}
 			if bytes.HasPrefix(bytes.TrimSpace(line), []byte("data:")) {
 				pt, ct = updateUsageFromSSE(line, pt, ct)
 			}

@@ -4,8 +4,8 @@ import CardPro from '@/components/common/ui/CardPro'
 import { changePassword, pickMessage } from '@/helpers/api'
 import { useTheme } from '@/context/Theme'
 
-// 密码最小长度, 与后端 config.MinPasswordLength(6) 保持一致, 避免前后端策略不一致
-const MIN_PASSWORD_LEN = 6
+// 密码最小长度, 与后端 config.MinPasswordLength(8) 保持一致, 避免前后端策略不一致
+const MIN_PASSWORD_LEN = 8
 
 // 设置页：修改密码 + 主题切换
 export default function Settings() {

@@ -542,6 +542,96 @@ func TestMessagesMaxTokensCacheIsolation(t *testing.T) {
 	}
 }
 
+// TestMessagesTemperatureCacheIsolation 回归: 不同 temperature 不应命中同一缓存
+func TestMessagesTemperatureCacheIsolation(t *testing.T) {
+	r, _, mainCalls := setupMessagesTestEnv(t)
+
+	base := `{"model":"claude-vision","messages":[{"role":"user","content":"写一首诗"}],"max_tokens":100,"stream":false`
+
+	b1 := base + `,"temperature":0.7}`
+	req1 := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(b1))
+	req1.Header.Set("anthropic-version", "2023-06-01")
+	r.ServeHTTP(httptest.NewRecorder(), req1)
+	if *mainCalls != 1 {
+		t.Fatalf("请求1应调用上游1次, 实际 %d", *mainCalls)
+	}
+
+	b2 := base + `,"temperature":0.1}`
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(b2))
+	req2.Header.Set("anthropic-version", "2023-06-01")
+	r.ServeHTTP(httptest.NewRecorder(), req2)
+	if *mainCalls != 2 {
+		t.Errorf("不同 temperature 不应命中同一缓存, 上游应调用第2次, 实际 %d", *mainCalls)
+	}
+
+	// 再发 temperature=0.7 -> 命中缓存
+	req3 := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(b1))
+	req3.Header.Set("anthropic-version", "2023-06-01")
+	r.ServeHTTP(httptest.NewRecorder(), req3)
+	if *mainCalls != 2 {
+		t.Errorf("相同 temperature 应命中缓存, 上游不应再调用, 实际 %d", *mainCalls)
+	}
+}
+
+// TestMessagesThinkingCacheIsolation 回归: Anthropic thinking 参数影响输出, 不同值不应命中同一缓存
+func TestMessagesThinkingCacheIsolation(t *testing.T) {
+	r, _, mainCalls := setupMessagesTestEnv(t)
+
+	base := `{"model":"claude-vision","messages":[{"role":"user","content":"思考一下"}],"max_tokens":100,"stream":false`
+
+	b1 := base + `,"thinking":{"type":"enabled","budget_tokens":10000}}`
+	req1 := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(b1))
+	req1.Header.Set("anthropic-version", "2023-06-01")
+	r.ServeHTTP(httptest.NewRecorder(), req1)
+	if *mainCalls != 1 {
+		t.Fatalf("请求1应调用上游1次, 实际 %d", *mainCalls)
+	}
+
+	b2 := base + `,"thinking":{"type":"disabled"}}`
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(b2))
+	req2.Header.Set("anthropic-version", "2023-06-01")
+	r.ServeHTTP(httptest.NewRecorder(), req2)
+	if *mainCalls != 2 {
+		t.Errorf("不同 thinking 不应命中同一缓存, 上游应调用第2次, 实际 %d", *mainCalls)
+	}
+
+	// 再发 thinking enabled+budget=10000 -> 命中缓存
+	req3 := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(b1))
+	req3.Header.Set("anthropic-version", "2023-06-01")
+	r.ServeHTTP(httptest.NewRecorder(), req3)
+	if *mainCalls != 2 {
+		t.Errorf("相同 thinking 应命中缓存, 上游不应再调用, 实际 %d", *mainCalls)
+	}
+}
+
+// TestChatReasoningEffortCacheIsolation 回归: OpenAI Chat 的 reasoning_effort 参数影响输出, 不同值不应命中同一缓存
+func TestChatReasoningEffortCacheIsolation(t *testing.T) {
+	r, _, mainCalls, _ := setupTestEnv(t)
+
+	base := `{"model":"mixed-vision","messages":[{"role":"user","content":"推理一下"}],"stream":false`
+
+	b1 := base + `,"reasoning_effort":"high"}`
+	req1 := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(b1))
+	r.ServeHTTP(httptest.NewRecorder(), req1)
+	if *mainCalls != 1 {
+		t.Fatalf("请求1应调用上游1次, 实际 %d", *mainCalls)
+	}
+
+	b2 := base + `,"reasoning_effort":"low"}`
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(b2))
+	r.ServeHTTP(httptest.NewRecorder(), req2)
+	if *mainCalls != 2 {
+		t.Errorf("不同 reasoning_effort 不应命中同一缓存, 上游应调用第2次, 实际 %d", *mainCalls)
+	}
+
+	// 再发 reasoning_effort=high -> 命中缓存
+	req3 := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(b1))
+	r.ServeHTTP(httptest.NewRecorder(), req3)
+	if *mainCalls != 2 {
+		t.Errorf("相同 reasoning_effort 应命中缓存, 上游不应再调用, 实际 %d", *mainCalls)
+	}
+}
+
 // TestMessagesAnthropicErrorFormat 回归: MES 错误响应必须是 Anthropic 格式,
 // 不能用 OpenAI 的 {"error":{"message":...}}. Claude SDK 依赖 {"type":"error","error":{...}}.
 func TestMessagesAnthropicErrorFormat(t *testing.T) {

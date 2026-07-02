@@ -298,6 +298,10 @@ func validateGroupReq(r *createGroupReq) error {
 		return errStr("描述不能超过 " + strconv.Itoa(maxDescriptionLength) + " 字符")
 	}
 	r.ImagePrompt = strings.TrimSpace(r.ImagePrompt)
+	// 先 trim 再做空值校验, 防止纯空白字符串绕过
+	r.MainTextModel.BaseURL = strings.TrimSpace(r.MainTextModel.BaseURL)
+	r.MainTextModel.Model = strings.TrimSpace(r.MainTextModel.Model)
+	r.MainTextModel.APIKey = strings.TrimSpace(r.MainTextModel.APIKey)
 	if r.MainTextModel.BaseURL == "" || r.MainTextModel.APIKey == "" || r.MainTextModel.Model == "" {
 		return errStr("主对话模型需填写 base_url/api_key/model")
 	}
@@ -311,6 +315,9 @@ func validateGroupReq(r *createGroupReq) error {
 		return errStr("图片策略仅支持 round_robin / failover")
 	}
 	for i := range r.ImageModels {
+		r.ImageModels[i].BaseURL = strings.TrimSpace(r.ImageModels[i].BaseURL)
+		r.ImageModels[i].Model = strings.TrimSpace(r.ImageModels[i].Model)
+		r.ImageModels[i].APIKey = strings.TrimSpace(r.ImageModels[i].APIKey)
 		if r.ImageModels[i].BaseURL == "" {
 			return errStr("图片模型 base_url 不能为空")
 		}

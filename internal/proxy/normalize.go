@@ -36,7 +36,7 @@ import (
 // 命中同一缓存返回错误响应"的硬伤(AGENTS.md 强调). 已纳入:
 //   - 采样/解码参数: temperature, top_p, top_k, stop, seed, max_tokens, ...
 //   - 工具相关: tools, tool_choice, parallel_tool_calls
-//   - 输出形态: n, response_format, reasoning
+//   - 输出形态: n, response_format, reasoning, reasoning_effort, thinking
 //   - 偏置: frequency_penalty, presence_penalty, logit_bias, logprobs, top_logprobs
 //   - 服务端状态依赖: previous_response_id, prompt_cache_key, store, include
 //   - 系统指令: instructions(Responses), system 已由调用方规范化进 contentCanonical
@@ -55,6 +55,8 @@ var outputAffectingKeys = []string{
 	"tool_choice",
 	"parallel_tool_calls",
 	"reasoning",
+	"reasoning_effort",
+	"thinking",
 	"response_format",
 	"seed",
 	"n",
@@ -110,11 +112,6 @@ func normalizeForCache(raw json.RawMessage) []byte {
 		return raw
 	}
 	return b
-}
-
-// normalizeMessagesInput 规范化 Chat / Messages API 的 messages 字段
-func normalizeMessagesInput(messages json.RawMessage) []byte {
-	return normalizeForCache(messages)
 }
 
 // composeCacheCanonical 把"输出影响参数指纹"与"内容规范化结果"拼接成最终 canonical
@@ -200,9 +197,4 @@ func hashDataURL(s string) string {
 	h.Write([]byte("b64:"))
 	h.Write([]byte(raw))
 	return hex.EncodeToString(h.Sum(nil))[:32]
-}
-
-// canonicalizeRaw 兼容旧调用(等价于 normalizeForCache)
-func canonicalizeRaw(raw json.RawMessage) []byte {
-	return normalizeForCache(raw)
 }

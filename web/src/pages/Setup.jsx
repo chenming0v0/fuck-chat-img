@@ -139,12 +139,12 @@ export default function Setup() {
             <Form.Input
               field="password"
               label="密码"
-              placeholder="至少 6 位"
+              placeholder="至少 8 位"
               mode="password"
               prefix={<IconLock />}
               rules={[
                 { required: true, message: '请输入密码' },
-                { min: 6, message: '密码至少 6 位' },
+                { min: 8, message: '密码至少 8 位' },
               ]}
             />
             <Form.Input

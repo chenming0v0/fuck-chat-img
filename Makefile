@@ -10,7 +10,7 @@ all: web build
 
 # 构建前端
 web:
-	cd web && $(if $(shell command -v bun >/dev/null 2>&1),bun install,npm install)
+	cd web && $(if $(shell command -v bun >/dev/null 2>&1),bun install --frozen-lockfile,npm ci)
 	cd web && $(WEB_BUILD)
 
 # ensure-dist: 保证 web/dist 存在(//go:embed dist 要求至少一个文件),
@@ -24,8 +24,9 @@ ensure-dist:
 	fi
 
 # 构建后端(前端产物已嵌入). 依赖 ensure-dist, 保证干净环境也能编译.
+# -ldflags="-s -w" 去除调试符号与 DWARF 信息, 与 Dockerfile 构建保持一致.
 build: ensure-dist
-	go build -o bin/fuck-chat-img .
+	go build -ldflags="-s -w" -o bin/fuck-chat-img .
 
 # 运行
 run: build

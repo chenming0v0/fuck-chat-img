@@ -233,7 +233,12 @@ export default function ModelGroup() {
           const res = await deleteGroup(row.id)
           if (res?.success) {
             Toast.success('已删除')
-            refresh()
+            // 删除最后一条记录时回退页码, 避免停留在空表格页(与 History.jsx 一致)
+            if (data.length === 1 && page > 1) {
+              setPage(page - 1)
+            } else {
+              refresh()
+            }
           } else {
             Toast.error(res?.message || '删除失败')
           }
@@ -246,16 +251,21 @@ export default function ModelGroup() {
 
   // 图片模型数组操作
   function addImageModel() {
-    setImageModels((prev) => [...prev, defaultUpstream()])
+    // defaultUpstream() 移到 updater 外部, 避免 React StrictMode 双重调用导致 _uid 跳号
+    const next = defaultUpstream()
+    setImageModels((prev) => [...prev, next])
   }
   function removeImageModel(idx) {
     setImageModels((prev) => {
       if (prev.length <= 1) {
-        Toast.warning('至少需要 1 个图片模型')
         return prev
       }
       return prev.filter((_, i) => i !== idx)
     })
+    // 副作用放在 setState updater 外, 避免 React StrictMode 双重调用导致重复弹 Toast
+    if (imageModels.length <= 1) {
+      Toast.warning('至少需要 1 个图片模型')
+    }
   }
   function updateImageModel(idx, key, value) {
     setImageModels((prev) =>
@@ -357,8 +367,9 @@ export default function ModelGroup() {
     }
   }
 
-  const columns = useMemo(
-    () => [
+  // columns 不做 useMemo: 内部闭包依赖 page/size/keyword/refresh 等响应式状态,
+      // memo 会导致切换/删除后用过期闭包刷新到错误页码(与 History.jsx 保持一致)
+  const columns = [
       {
         title: '名称',
         dataIndex: 'name',
@@ -462,10 +473,7 @@ export default function ModelGroup() {
           </div>
         ),
       },
-    ],
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [isAdmin, togglingId],
-  )
+    ]
 
   // 把 formValues 展平为 Semi Form 的 initValues（点号字段）
   const initValues = useMemo(() => {

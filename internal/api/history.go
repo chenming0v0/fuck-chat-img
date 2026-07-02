@@ -46,10 +46,13 @@ func ListHistory(c *gin.Context) {
 			q = q.Where("user_id = ?", userID)
 		}
 		if keyword != "" {
-			escaped := escapeLike(keyword)
-			q = q.Where("request_id LIKE ? ESCAPE '\\' OR input_summary LIKE ? ESCAPE '\\' OR output_summary LIKE ? ESCAPE '\\' OR error_message LIKE ? ESCAPE '\\'",
-				"%"+escaped+"%", "%"+escaped+"%", "%"+escaped+"%", "%"+escaped+"%")
-		}
+		escaped := escapeLike(keyword)
+		// 整段 OR 必须用括号包裹: 否则与非管理员的 user_id、group、success、cache_hit
+		// 等过滤项组合时, 因 SQL 中 AND 优先级高于 OR, OR 子句会脱离 user_id 约束,
+		// 导致跨用户数据泄漏(破坏 AGENTS.md 要求的 History 读侧用户隔离).
+		q = q.Where("(request_id LIKE ? ESCAPE '\\' OR input_summary LIKE ? ESCAPE '\\' OR output_summary LIKE ? ESCAPE '\\' OR error_message LIKE ? ESCAPE '\\')",
+			"%"+escaped+"%", "%"+escaped+"%", "%"+escaped+"%", "%"+escaped+"%")
+	}
 		if group != "" {
 			q = q.Where("model_group = ?", group)
 		}

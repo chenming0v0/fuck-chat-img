@@ -292,6 +292,7 @@ func handleResponsesStream(c *gin.Context, g *modelGroupRuntime, body []byte, re
 	flusher, _ := c.Writer.(http.Flusher)
 
 	var collected [][]byte
+	var collectedBytes int
 	var pt, ct int
 	clientDisconnected := false
 	streamErr := false
@@ -307,7 +308,10 @@ func handleResponsesStream(c *gin.Context, g *modelGroupRuntime, body []byte, re
 				clientDisconnected = true
 				break
 			}
-			collected = append(collected, line)
+			if collectedBytes+len(line) <= maxResponseBodySize {
+				collected = append(collected, line)
+				collectedBytes += len(line)
+			}
 			if bytes.HasPrefix(bytes.TrimSpace(line), []byte("data:")) {
 				pt, ct = updateUsageFromSSE(line, pt, ct)
 			}

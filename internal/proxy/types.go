@@ -66,7 +66,7 @@ func resetHTTPClients() {
 
 // extractUserID 从 gin.Context 提取用户ID(由 MiddlewareProxyAuth/MiddlewareAuth 写入)
 // 用于把代理请求历史归属到具体用户, 实现 History 的用户隔离.
-// FCI_PROXY_KEY 匿名访问场景下返回 0.
+// FCI_PROXY_KEY 认证场景下返回 ProxyUserID(MaxUint), 缺失 context 时返回 0(异常值).
 func extractUserID(c *gin.Context) uint {
 	if v, exists := c.Get(auth.ContextKeyUserID); exists {
 		if uid, ok := v.(uint); ok {
@@ -206,8 +206,8 @@ var (
 )
 
 // nextImageModels 按策略返回尝试顺序
-// round_robin: 从轮询游标位置开始依次尝试所有模型
-// failover: 只返回第一个模型(主模型), 失败后才尝试下一个(由 recognizeImage 处理)
+// round_robin: 从轮询游标位置开始依次尝试所有模型(旋转起始点)
+// failover: 返回全部模型, 从下标 0 开始; 由 recognizeImage 按序逐个尝试直到成功
 func nextImageModels(g *modelGroupRuntime) []UpstreamModelRT {
 	if len(g.ImageModels) == 0 {
 		return nil

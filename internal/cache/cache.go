@@ -153,6 +153,14 @@ func Enabled() bool {
 	return s != nil && s.enabled
 }
 
+// Close 停止后台清理 goroutine, 用于优雅关闭
+func Close() {
+	s := loadStore()
+	if s != nil {
+		s.Close()
+	}
+}
+
 func loadStore() *Store {
 	v := store.Load()
 	if v == nil {
@@ -282,10 +290,6 @@ var (
 	hits   int64
 	misses int64
 )
-
-func RecordHit() { atomic.AddInt64(&hits, 1) }
-
-func RecordMiss() { atomic.AddInt64(&misses, 1) }
 
 func GetStats() Stats {
 	s := loadStore()

@@ -29,10 +29,6 @@ type imgResult struct {
 	err      error
 }
 
-func processImagesInValue(g *modelGroupRuntime, v interface{}, ctx context.Context) (interface{}, imgResult) {
-	return processImagesInValueCfg(g, v, defaultImgConfig(g), ctx)
-}
-
 func processImagesInValueCfg(g *modelGroupRuntime, v interface{}, cfg imgProcessConfig, ctx context.Context) (interface{}, imgResult) {
 	res := imgResult{}
 	switch t := v.(type) {
@@ -43,7 +39,7 @@ func processImagesInValueCfg(g *modelGroupRuntime, v interface{}, cfg imgProcess
 				url, b64, ok := extractImageRef(cm)
 				if ok {
 					imgs := nextImageModels(g)
-					desc, used, err := recognizeImage(ctx, imgs, g.ImageStrategy, g.ImagePrompt, url, b64, sharedHTTPClient)
+					desc, used, err := recognizeImage(ctx, imgs, g.ImagePrompt, url, b64, sharedHTTPClient)
 					if err != nil {
 						res.hasImage = true
 						res.imgCount++
@@ -86,7 +82,7 @@ func processImagesInValueCfg(g *modelGroupRuntime, v interface{}, cfg imgProcess
 			url, b64, ok := extractImageRef(t)
 			if ok {
 				imgs := nextImageModels(g)
-				desc, used, err := recognizeImage(ctx, imgs, g.ImageStrategy, g.ImagePrompt, url, b64, sharedHTTPClient)
+				desc, used, err := recognizeImage(ctx, imgs, g.ImagePrompt, url, b64, sharedHTTPClient)
 				if err != nil {
 					res.hasImage = true
 					res.imgCount = 1
@@ -139,7 +135,7 @@ func processImagesInValueCfg(g *modelGroupRuntime, v interface{}, cfg imgProcess
 		}
 		if isDataURLString(t) {
 			imgs := nextImageModels(g)
-			desc, used, err := recognizeImage(ctx, imgs, g.ImageStrategy, g.ImagePrompt, "", t, sharedHTTPClient)
+			desc, used, err := recognizeImage(ctx, imgs, g.ImagePrompt, "", t, sharedHTTPClient)
 			if err != nil {
 				res.hasImage = true
 				res.imgCount = 1
@@ -187,58 +183,4 @@ func isDataURLString(s string) bool {
 		return false
 	}
 	return len(s) > len("data:;base64,")+16
-}
-
-func processImagesInStringContent(g *modelGroupRuntime, s string, ctx context.Context) (string, bool, int, string, error) {
-	return processImagesInStringContentCfg(g, s, defaultImgConfig(g), ctx)
-}
-
-func processImagesInStringContentCfg(g *modelGroupRuntime, s string, cfg imgProcessConfig, ctx context.Context) (string, bool, int, string, error) {
-	stripped := strings.TrimSpace(s)
-	if stripped == "" {
-		return s, false, 0, "", nil
-	}
-	if (strings.HasPrefix(stripped, "{") && strings.HasSuffix(stripped, "}")) ||
-		(strings.HasPrefix(stripped, "[") && strings.HasSuffix(stripped, "]")) {
-		var v interface{}
-		if err := json.Unmarshal([]byte(stripped), &v); err == nil {
-			newV, r := processImagesInValueCfg(g, v, cfg, ctx)
-			if r.err != nil {
-				return s, r.hasImage, r.imgCount, r.imgModel, r.err
-			}
-			if !r.hasImage {
-				return s, false, 0, "", nil
-			}
-			newBytes, mErr := json.Marshal(newV)
-			if mErr != nil {
-				return s, r.hasImage, r.imgCount, r.imgModel, mErr
-			}
-			return string(newBytes), true, r.imgCount, r.imgModel, nil
-		}
-	}
-	if isDataURLString(stripped) {
-		imgs := nextImageModels(g)
-		desc, used, err := recognizeImage(ctx, imgs, g.ImageStrategy, g.ImagePrompt, "", stripped, sharedHTTPClient)
-		if err != nil {
-			return s, true, 1, used, err
-		}
-		return "[图片识别结果]\n" + desc, true, 1, used, nil
-	}
-	return s, false, 0, "", nil
-}
-
-func processMessageContent(g *modelGroupRuntime, content interface{}, ctx context.Context) (interface{}, bool, int, string, error) {
-	return processMessageContentCfg(g, content, defaultImgConfig(g), ctx)
-}
-
-func processMessageContentCfg(g *modelGroupRuntime, content interface{}, cfg imgProcessConfig, ctx context.Context) (interface{}, bool, int, string, error) {
-	switch t := content.(type) {
-	case []interface{}:
-		newV, r := processImagesInValueCfg(g, t, cfg, ctx)
-		return newV, r.hasImage, r.imgCount, r.imgModel, r.err
-	case string:
-		return processImagesInStringContentCfg(g, t, cfg, ctx)
-	default:
-		return content, false, 0, "", nil
-	}
 }

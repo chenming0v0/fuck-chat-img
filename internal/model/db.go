@@ -48,6 +48,7 @@ func initDB(dsn string, needEnv bool) error {
 	if needEnv {
 		if err := initAdminFromEnv(); err != nil {
 			sqlDB.Close()
+			DB = nil
 			return err
 		}
 	}
@@ -120,11 +121,12 @@ func initAdminFromEnv() error {
 }
 
 // IsSetupRequired 判断是否需要进行首次管理员设置(没有任何用户时返回 true)
+// 查询失败时 fail-open 返回 true: 引导走 setup 流程更易恢复, 避免把首次安装锁死.
 func IsSetupRequired() bool {
 	var count int64
 	if err := DB.Model(&User{}).Count(&count).Error; err != nil {
 		log.Printf("[fci] IsSetupRequired 查询失败: %v", err)
-		return false
+		return true
 	}
 	return count == 0
 }
@@ -171,7 +173,17 @@ func isUniqueConstraintErr(err error) bool {
 	return strings.Contains(s, "UNIQUE constraint failed") || strings.Contains(s, "Duplicate entry")
 }
 
-var dummyHash = "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"
+// dummyHash 用 cost 12 生成, 与 config.BcryptCost 一致, 确保"用户不存在"路径
+// 与"用户存在但密码错"路径的 bcrypt 比对耗时相近, 防止时序侧信道枚举用户名.
+// 若生成失败则 panic: 输入合法且 cost 来自 config, 失败意味着 bcrypt 库/配置异常,
+// 此时 dummyHash 为空会导致时序防护失效, 应硬失败而非静默降级.
+var dummyHash = func() string {
+	h, err := bcrypt.GenerateFromPassword([]byte("dummy-fixed-nonsecret-do-not-login"), config.BcryptCost)
+	if err != nil {
+		panic("failed to generate dummyHash: " + err.Error())
+	}
+	return string(h)
+}()
 
 func verifyPasswordWithHash(hash string, password string) bool {
 	err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))

@@ -155,7 +155,7 @@ func fetchChatNonStream(g *modelGroupRuntime, body []byte, ctx context.Context, 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		respBytes, err = io.ReadAll(io.LimitReader(resp.Body, maxErrorBodySize))
 	} else {
-		respBytes, err = io.ReadAll(resp.Body)
+		respBytes, err = io.ReadAll(io.LimitReader(resp.Body, maxResponseBodySize))
 	}
 	if err != nil {
 		log.Printf("read response body error: %v", err)
@@ -251,6 +251,7 @@ func handleChatStream(c *gin.Context, g *modelGroupRuntime, body []byte, reqID s
 	c.Writer.Header().Set("X-Accel-Buffering", "no")
 	flusher, _ := c.Writer.(http.Flusher)
 	var collected [][]byte
+	var collectedBytes int
 	pt, ct := 0, 0
 	clientDisconnected := false
 	streamErr := false
@@ -266,7 +267,10 @@ func handleChatStream(c *gin.Context, g *modelGroupRuntime, body []byte, reqID s
 				clientDisconnected = true
 				break
 			}
-			collected = append(collected, line)
+			if collectedBytes+len(line) <= maxResponseBodySize {
+				collected = append(collected, line)
+				collectedBytes += len(line)
+			}
 			if bytes.HasPrefix(bytes.TrimSpace(line), []byte("data:")) {
 				pt, ct = updateUsageFromSSE(line, pt, ct)
 			}
@@ -300,7 +304,10 @@ func handleChatStream(c *gin.Context, g *modelGroupRuntime, body []byte, reqID s
 
 func HandleModels(c *gin.Context) {
 	var groups []model.ModelGroup
-	model.DB.Where("enabled = ?", true).Find(&groups)
+	if err := model.DB.Where("enabled = ?", true).Find(&groups).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": map[string]string{"message": "数据库查询失败"}})
+		return
+	}
 	data := make([]gin.H, 0, len(groups))
 	for _, g := range groups {
 		data = append(data, gin.H{

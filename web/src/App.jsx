@@ -53,7 +53,7 @@ export default function App() {
             <Route index element={<Dashboard />} />
             <Route path="groups" element={<AdminRoute><ModelGroup /></AdminRoute>} />
             <Route path="plaza" element={<ModelPlaza />} />
-            <Route path="history" element={<History />} />
+            <Route path="history" element={<AdminRoute><History /></AdminRoute>} />
             <Route path="settings" element={<Settings />} />
           </Route>
           <Route path="*" element={<NotFound />} />

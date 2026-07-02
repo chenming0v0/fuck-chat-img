@@ -14,7 +14,9 @@ instance.interceptors.response.use(
   (response) => response.data,
   (error) => {
     const status = error?.response?.status
-    if (status === 401) {
+    // 跳过登录请求本身的 401(凭证错误): 仅清态+跳转, 不触发多余的 /logout 调用
+    const isLoginReq = error?.config?.url === '/login'
+    if (status === 401 && !isLoginReq) {
       if (isHandling401) {
         return Promise.reject(error)
       }

@@ -174,16 +174,11 @@ func isImageContentItem(c map[string]interface{}) bool {
 	return false
 }
 
-// ImageModelsConfig 图片模型配置(运行时使用)
-type ImageModelsConfig struct {
-	Group     *modelGroupRuntime
-	Prompt    string
-	Strategy  string
-}
-
 // recognizeImage 用图片模型轮询识别单张图片, 返回文本描述
 // 若所有图片模型都失败则返回 error (满足"图片识别失败直接返回报错")
-func recognizeImage(ctx context.Context, imgModels []UpstreamModelRT, strategy string, prompt string, imageURL, imageB64 string, client *http.Client) (string, string, error) {
+// 注意: 轮询/故障转移策略由调用方通过 nextImageModels 决定 imgModels 的顺序与范围,
+// 本函数只按传入顺序逐个尝试, 不再接收 strategy 参数.
+func recognizeImage(ctx context.Context, imgModels []UpstreamModelRT, prompt string, imageURL, imageB64 string, client *http.Client) (string, string, error) {
 	if len(imgModels) == 0 {
 		return "", "", errors.New("未配置图片模型")
 	}
@@ -198,7 +193,6 @@ func recognizeImage(ctx context.Context, imgModels []UpstreamModelRT, strategy s
 		} else {
 			lastErr = fmt.Errorf("[%s] %v", m.DisplayName(), err)
 		}
-		_ = strategy
 	}
 	if lastErr == nil {
 		lastErr = errors.New("所有图片模型均返回空结果")

@@ -72,7 +72,11 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
+		// 超时后 Shutdown 不会强制关闭残留连接, 需显式 Close 避免在途 handler
+		// 与随后 defer 的 DB Close 竞态(use of closed connection).
 		log.Printf("[fci] 优雅关闭超时或出错: %v", err)
+		srv.Close()
 	}
+	cache.Close()
 	log.Printf("[fci] 已退出")
 }

@@ -83,6 +83,40 @@ func TestGetPutBasic(t *testing.T) {
 	}
 }
 
+func TestPutStreamWithMetaAndGet(t *testing.T) {
+	resetTestStore(100, time.Hour)
+
+	key := "stream-key"
+	events := [][]byte{
+		[]byte("data: chunk1\n\n"),
+		[]byte("data: chunk2\n\n"),
+	}
+	PutStreamWithMeta(key, "stream-model", events, true, 2, "img-model")
+
+	e, ok := Get(key)
+	if !ok {
+		t.Fatal("Get on stream key should return true")
+	}
+	if !e.IsStream {
+		t.Error("stream entry should have IsStream=true")
+	}
+	if len(e.StreamEvents) != 2 {
+		t.Errorf("expected 2 stream events, got %d", len(e.StreamEvents))
+	}
+	if string(e.StreamEvents[0]) != "data: chunk1\n\n" {
+		t.Errorf("first event mismatch: %q", e.StreamEvents[0])
+	}
+	if !e.HasImage || e.ImageCount != 2 {
+		t.Errorf("expected HasImage=true ImageCount=2, got HasImage=%v ImageCount=%d", e.HasImage, e.ImageCount)
+	}
+	if e.ImageModelUsed != "img-model" {
+		t.Errorf("expected ImageModelUsed=img-model, got %q", e.ImageModelUsed)
+	}
+	if e.ModelName != "stream-model" {
+		t.Errorf("expected ModelName=stream-model, got %q", e.ModelName)
+	}
+}
+
 func TestLRUEviction(t *testing.T) {
 	s := resetTestStore(3, time.Hour)
 
@@ -156,6 +190,19 @@ func TestCacheConcurrency(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+
+	// 并发结束后验证所有 key 均存在且值正确(原测试仅验证不 panic/不 hang)
+	for i := 0; i < 20; i++ {
+		key := fmt.Sprintf("key-%d", i)
+		e, ok := Get(key)
+		if !ok {
+			t.Errorf("key %q should exist after concurrent Put", key)
+			continue
+		}
+		if string(e.Value) != "value" {
+			t.Errorf("key %q value = %q, want %q", key, e.Value, "value")
+		}
+	}
 }
 
 func TestCacheCloseStopsGoroutine(t *testing.T) {
@@ -169,7 +216,8 @@ func TestCacheCloseStopsGoroutine(t *testing.T) {
 }
 
 func TestCacheExpiry(t *testing.T) {
-	s := resetTestStore(100, 10*time.Millisecond)
+	// 用 100ms TTL 而非 10ms, 降低调度器抢占导致的 flaky 风险(jitter 为 ±10%)
+	s := resetTestStore(100, 100*time.Millisecond)
 
 	key := "expiring-key"
 	PutWithMeta(key, "m", []byte("value"), false, 0, "")
@@ -179,7 +227,7 @@ func TestCacheExpiry(t *testing.T) {
 		t.Fatal("key should exist immediately after Put")
 	}
 
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
 
 	_, ok = Get(key)
 	if ok {

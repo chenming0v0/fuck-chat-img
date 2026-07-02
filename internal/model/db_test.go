@@ -202,9 +202,9 @@ func TestUpdatePasswordRejectsWeakPassword(t *testing.T) {
 		t.Error("UpdatePassword should reject password > 72 bytes")
 	}
 
-	shortBoundary := "123456"
+	shortBoundary := "12345678"
 	if err := UpdatePassword(u.ID, shortBoundary); err != nil {
-		t.Errorf("UpdatePassword should accept 6-char password, got: %v", err)
+		t.Errorf("UpdatePassword should accept 8-char password (minimum length), got: %v", err)
 	}
 }
 
@@ -215,9 +215,9 @@ func TestUpdatePasswordBoundaryLengths(t *testing.T) {
 	}
 	u, _ := VerifyPassword("admin", "password123")
 
-	pw6 := "abcdef"
-	if err := UpdatePassword(u.ID, pw6); err != nil {
-		t.Errorf("6-char password should be accepted: %v", err)
+	pw8 := "abcdefgh"
+	if err := UpdatePassword(u.ID, pw8); err != nil {
+		t.Errorf("8-char password should be accepted (minimum length): %v", err)
 	}
 
 	pw72 := make([]byte, 72)

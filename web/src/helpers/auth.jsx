@@ -23,12 +23,6 @@ export function AuthProvider({ children }) {
   // 登录成功后更新前端状态(Cookie已由服务端Set-Cookie设置)
   function handleLogin(data) {
     const { username: u, role: r } = data
-    localStorage.setItem('fci_username', u)
-    if (r) {
-      localStorage.setItem('fci_role', r)
-    } else {
-      localStorage.removeItem('fci_role')
-    }
     setUsername(u)
     setRole(r || '')
     setIsAuthenticated(true)
@@ -42,8 +36,6 @@ export function AuthProvider({ children }) {
     } catch (e) {
       // 忽略网络错误，本地状态仍需清空
     }
-    localStorage.removeItem('fci_username')
-    localStorage.removeItem('fci_role')
     if (mountedRef.current) {
       setUsername('')
       setRole('')
@@ -62,20 +54,12 @@ export function AuthProvider({ children }) {
         setUsername(res.data.username || '')
         setRole(res.data.role || '')
         setIsAuthenticated(true)
-        if (res.data.username) {
-          localStorage.setItem('fci_username', res.data.username)
-        }
-        if (res.data.role) {
-          localStorage.setItem('fci_role', res.data.role)
-        }
         return res.data
       }
     } catch (e) {
       if (!mountedRef.current) return null
       // 401说明Cookie无效/过期，清空登录态
       if (e?.response?.status === 401) {
-        localStorage.removeItem('fci_username')
-        localStorage.removeItem('fci_role')
         setUsername('')
         setRole('')
         setUser(null)

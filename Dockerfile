@@ -5,12 +5,12 @@ FROM node:20-alpine AS web-builder
 WORKDIR /web
 # 先拷贝依赖描述以利用层缓存
 COPY web/package.json web/bun.lock* web/package-lock.json* ./
-# 优先 bun(--frozen-lockfile 保证可复现); 失败则回退 npm. 不再吞掉 stderr,
-# 锁文件不一致时显式失败而非悄悄回退, 保证构建可复现性.
+# 优先 bun(--frozen-lockfile 保证可复现); 回退 npm ci(基于 package-lock.json, 同样可复现).
+# 不再吞掉 stderr, 锁文件不一致时显式失败而非悄悄回退, 保证构建可复现性.
 RUN if command -v bun >/dev/null 2>&1; then \
         bun install --frozen-lockfile; \
     else \
-        npm install; \
+        npm ci; \
     fi
 COPY web/ ./
 RUN if command -v bun >/dev/null 2>&1; then bun run build; else npm run build; fi
@@ -30,13 +30,14 @@ ENV CGO_ENABLED=1
 RUN go build -ldflags="-s -w" -o /out/fuck-chat-img .
 
 # ===== Stage 3: 运行时 =====
-FROM alpine:3.20
+# 与 go-builder 的 golang:1.25-alpine(基于 alpine 3.21) 保持一致, 避免跨 alpine 大版本的 musl 版本错配
+FROM alpine:3.21
 # 非 root 运行(容器最小权限)
 RUN addgroup -S app && adduser -S app -G app && \
     apk add --no-cache ca-certificates tzdata && \
     mkdir -p /app/data && chown -R app:app /app
 WORKDIR /app
-COPY --from=go-builder /out/fuck-chat-img /app/fuck-chat-img
+COPY --chown=app:app --from=go-builder /out/fuck-chat-img /app/fuck-chat-img
 # 前端嵌入二进制, 无需单独拷贝 dist; 此处仅声明数据卷
 ENV FCI_LISTEN=:8080 \
     FCI_DB_PATH=/app/data/fci.db \
